@@ -3,10 +3,10 @@ package main
 import (
 	"anytls/proxy/padding"
 	"anytls/proxy/session"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"net"
 	"runtime/debug"
 	"strings"
@@ -38,11 +38,21 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	c = bufio.NewCachedConn(c, b)
 
 	by, err := b.ReadBytes(32)
-	if err != nil || !bytes.Equal(by, passwordSha256) {
+	if err != nil {
 		b.Resize(0, n)
 		fallback(ctx, c)
 		return
 	}
+	id, ok, authErr := s.auth.Authenticate(c.RemoteAddr().String(), hex.EncodeToString(by), 0)
+	if authErr != nil {
+		logrus.Warnln("auth backend error:", authErr)
+	}
+	if !ok {
+		b.Resize(0, n)
+		fallback(ctx, c)
+		return
+	}
+
 	by, err = b.ReadBytes(2)
 	if err != nil {
 		b.Resize(0, n)
@@ -59,7 +69,7 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 	}
 
-	session := session.NewServerSession(c, func(stream *session.Stream) {
+	sess := session.NewServerSession(c, func(stream *session.Stream) {
 		defer func() {
 			if r := recover(); r != nil {
 				logrus.Errorln("[BUG]", r, string(debug.Stack()))
@@ -79,8 +89,15 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 			proxyOutboundTCP(ctx, stream, destination)
 		}
 	}, &padding.DefaultPaddingFactory)
-	session.Run()
-	session.Close()
+
+	if s.stats != nil {
+		u := s.stats.Attach(id, c.RemoteAddr().String(), sess)
+		sess.Identity = u
+		defer s.stats.Detach(id, sess)
+	}
+
+	sess.Run()
+	sess.Close()
 }
 
 func fallback(ctx context.Context, c net.Conn) {

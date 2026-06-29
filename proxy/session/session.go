@@ -53,6 +53,18 @@ type Session struct {
 
 	// server
 	onNewStream func(stream *Stream)
+
+	// Identity, when non-nil, receives Tx/Rx byte counts for every stream
+	// payload going through this session. Set once by the server after
+	// authentication; read lock-free from the data path.
+	Identity TrafficCounter
+}
+
+// TrafficCounter is the subset of *stats.UserStat the session needs.
+// Declared here to avoid an import cycle with the stats package.
+type TrafficCounter interface {
+	AddTx(int64)
+	AddRx(int64)
 }
 
 func NewClientSession(conn net.Conn, _padding *atomic.TypedValue[*padding.PaddingFactory]) *Session {

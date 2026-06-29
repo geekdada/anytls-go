@@ -42,6 +42,11 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 	if n == 0 && s.dieErr != nil {
 		err = s.dieErr
 	}
+	if n > 0 {
+		if tc := s.sess.Identity; tc != nil {
+			tc.AddRx(int64(n))
+		}
+	}
 	return
 }
 
@@ -56,6 +61,11 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		return 0, s.dieErr
 	}
 	n, err = s.sess.writeDataFrame(s.id, b)
+	if n > 0 {
+		if tc := s.sess.Identity; tc != nil {
+			tc.AddTx(int64(n))
+		}
+	}
 	return
 }
 
