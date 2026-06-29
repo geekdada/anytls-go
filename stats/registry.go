@@ -99,6 +99,33 @@ func (r *Registry) Snapshot() map[string]TrafficEntry {
 	return out
 }
 
+// Clear resets cumulative counters and frees history for offline users,
+// returning the pre-clear snapshot. It mirrors hysteria's GET
+// /traffic?clear=true and is the only memory-management mechanism (there is no
+// background sweeper, matching hysteria).
+//
+// Live sessions hold their *UserStat via Session.Identity, so entries with
+// active sessions are kept and zeroed in place rather than deleted; deleting
+// them would orphan the live counters and break kick. Offline entries are
+// removed outright, bounding memory.
+func (r *Registry) Clear() map[string]TrafficEntry {
+	snap := r.Snapshot()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, u := range r.users {
+		u.mu.Lock()
+		live := len(u.sessions)
+		u.mu.Unlock()
+		if live == 0 {
+			delete(r.users, id)
+		} else {
+			u.Tx.Store(0)
+			u.Rx.Store(0)
+		}
+	}
+	return snap
+}
+
 // Online returns the number of active sessions for each id that has at least
 // one session connected right now. Ids with traffic history but no live
 // sessions are omitted (matching hysteria's /online semantics).

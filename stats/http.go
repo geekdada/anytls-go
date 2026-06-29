@@ -20,6 +20,12 @@ type ServerOptions struct {
 func NewHandler(opts ServerOptions) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/traffic", auth(opts.Secret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ?clear=true returns the current stats then resets counters and frees
+		// offline entries, matching hysteria's traffic-stats semantics.
+		if r.URL.Query().Get("clear") == "true" {
+			writeJSON(w, opts.Registry.Clear())
+			return
+		}
 		writeJSON(w, opts.Registry.Snapshot())
 	})))
 	mux.Handle("/online", auth(opts.Secret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

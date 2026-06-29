@@ -59,3 +59,57 @@ func TestLoadFileMissing(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestAuthCacheTTL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `auth:
+  type: http
+  http:
+    url: http://b/auth
+    cacheTTL: 60s
+    cacheSize: 100
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ttl, err := c.AuthCacheTTL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl != 60_000_000_000 { // 60s in ns
+		t.Fatalf("ttl = %v, want 60s", ttl)
+	}
+	if c.Auth.HTTP.CacheSize != 100 {
+		t.Fatalf("cacheSize = %d", c.Auth.HTTP.CacheSize)
+	}
+}
+
+func TestAuthCacheTTLEmptyDisabled(t *testing.T) {
+	c := Default()
+	ttl, err := c.AuthCacheTTL()
+	if err != nil || ttl != 0 {
+		t.Fatalf("empty TTL should be (0, nil), got (%v, %v)", ttl, err)
+	}
+}
+
+func TestAuthCacheTTLInvalidFailsLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `auth:
+  type: http
+  http:
+    url: http://b/auth
+    cacheTTL: nonsense
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("expected load to fail on bad cacheTTL")
+	}
+}

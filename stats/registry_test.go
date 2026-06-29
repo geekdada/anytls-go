@@ -105,6 +105,35 @@ func TestRegistryKick(t *testing.T) {
 	}
 }
 
+func TestRegistryClear(t *testing.T) {
+	r := NewRegistry()
+	live := &fakeSession{}
+	offline := &fakeSession{}
+	r.Attach("alice", "1.1.1.1:1", live).AddTx(100)
+	off := r.Attach("bob", "2.2.2.2:2", offline)
+	off.AddRx(200)
+	r.Detach("bob", offline) // bob has history but no live session
+
+	snap := r.Clear()
+	if snap["alice"].Tx != 100 || snap["bob"].Rx != 200 {
+		t.Fatalf("clear should return pre-clear snapshot, got %#v", snap)
+	}
+
+	// alice is live: kept but zeroed.
+	after := r.Snapshot()
+	if _, ok := after["bob"]; ok {
+		t.Fatal("offline bob should be purged after clear")
+	}
+	if tr, ok := after["alice"]; !ok || tr.Tx != 0 || tr.Rx != 0 {
+		t.Fatalf("live alice should be kept and zeroed, got %#v ok=%v", tr, ok)
+	}
+
+	// alice's live session is still kickable (UserStat pointer intact).
+	if closed := r.Kick([]string{"alice"}); closed != 1 {
+		t.Fatalf("alice should still be kickable, kicked %d", closed)
+	}
+}
+
 func TestRegistryDumpSessions(t *testing.T) {
 	r := NewRegistry()
 	r.Attach("alice", "1.1.1.1:1", &fakeSession{}).AddTx(7)

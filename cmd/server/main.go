@@ -74,6 +74,14 @@ func main() {
 	case cfg.UseHTTPAuth():
 		authn = auth.NewHTTPAuthenticator(cfg.Auth.HTTP.URL, cfg.Auth.HTTP.Insecure)
 		logrus.Infoln("[Auth] using HTTP backend at", cfg.Auth.HTTP.URL)
+		if ttl, _ := cfg.AuthCacheTTL(); ttl > 0 {
+			size := cfg.Auth.HTTP.CacheSize
+			if size <= 0 {
+				size = 4096
+			}
+			authn = auth.NewCachingAuthenticator(authn, ttl, size)
+			logrus.Infoln("[Auth] result cache enabled, ttl", ttl, "size", size)
+		}
 	default:
 		if cfg.Password == "" {
 			logrus.Fatalln("please set password (config.password or -p)")

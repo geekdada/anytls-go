@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +24,12 @@ type AuthConfig struct {
 type HTTPAuthConfig struct {
 	URL      string `yaml:"url"`
 	Insecure bool   `yaml:"insecure"`
+	// CacheTTL caches successful auths for this duration (e.g. "60s") so
+	// reconnects skip the backend. Empty or "0" disables caching.
+	CacheTTL string `yaml:"cacheTTL"`
+	// CacheSize bounds the number of cached entries (default 4096 when
+	// caching is enabled).
+	CacheSize int `yaml:"cacheSize"`
 }
 
 type TrafficStatsConfig struct {
@@ -49,7 +56,27 @@ func LoadFile(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
+	if _, err := c.AuthCacheTTL(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
 	return c, nil
+}
+
+// AuthCacheTTL parses the HTTP-auth cache TTL. An empty value means caching is
+// disabled (returns 0).
+func (c *Config) AuthCacheTTL() (time.Duration, error) {
+	s := c.Auth.HTTP.CacheTTL
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid auth.http.cacheTTL %q: %w", s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("auth.http.cacheTTL %q must not be negative", s)
+	}
+	return d, nil
 }
 
 // UseHTTPAuth reports whether the operator has enabled external HTTP auth.

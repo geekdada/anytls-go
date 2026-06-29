@@ -99,6 +99,46 @@ func TestHTTPKickRejectsGet(t *testing.T) {
 	}
 }
 
+func TestHTTPTrafficClear(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+
+	// clear=true returns the pre-clear snapshot.
+	req := httptest.NewRequest(http.MethodGet, "/traffic?clear=true", nil)
+	req.Header.Set("Authorization", "s3cr3t")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var got map[string]TrafficEntry
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["alice"].Tx != 100 {
+		t.Fatalf("clear should return current stats first, got %#v", got)
+	}
+
+	// A follow-up read shows live users zeroed.
+	req2 := httptest.NewRequest(http.MethodGet, "/traffic", nil)
+	req2.Header.Set("Authorization", "s3cr3t")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	var after map[string]TrafficEntry
+	if err := json.NewDecoder(rec2.Body).Decode(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after["alice"].Tx != 0 {
+		t.Fatalf("alice should be zeroed after clear, got %#v", after["alice"])
+	}
+}
+
+func TestHTTPTrafficClearRequiresAuth(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/traffic?clear=true", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("clear without secret = %d, want 401", rec.Code)
+	}
+}
+
 func TestHTTPDumpStreams(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/dump/streams", nil)
