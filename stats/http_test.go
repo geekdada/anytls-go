@@ -73,14 +73,11 @@ func TestHTTPKick(t *testing.T) {
 	req.Header.Set("Authorization", "s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
+	if rec.Code != http.StatusOK {
 		buf, _ := io.ReadAll(rec.Body)
 		t.Fatalf("status = %d body = %s", rec.Code, buf)
 	}
-	for i := 0; i < 100 && !a.closed.Load(); i++ {
-		runtimeGosched()
-	}
-	if !a.closed.Load() {
+	if !waitClosed(a) {
 		t.Fatal("alice not closed")
 	}
 	if b.closed.Load() {
@@ -129,6 +126,34 @@ func TestHTTPTrafficClear(t *testing.T) {
 	}
 }
 
+func TestHTTPTrafficClearParseBool(t *testing.T) {
+	// hysteria parses ?clear with strconv.ParseBool, so "1" must also clear.
+	h, _, _, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/traffic?clear=1", nil)
+	req.Header.Set("Authorization", "s3cr3t")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var got map[string]TrafficEntry
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["alice"].Tx != 100 {
+		t.Fatalf("clear=1 should return pre-clear snapshot, got %#v", got)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/traffic", nil)
+	req2.Header.Set("Authorization", "s3cr3t")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	var after map[string]TrafficEntry
+	if err := json.NewDecoder(rec2.Body).Decode(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after["alice"].Tx != 0 {
+		t.Fatalf("alice should be zeroed after clear=1, got %#v", after["alice"])
+	}
+}
+
 func TestHTTPTrafficClearRequiresAuth(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/traffic?clear=true", nil)
@@ -140,16 +165,57 @@ func TestHTTPTrafficClearRequiresAuth(t *testing.T) {
 }
 
 func TestHTTPDumpStreams(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
+	r := NewRegistry()
+	conn := r.NewConnID()
+	s := r.TraceStream("alice", conn, 1)
+	s.SetReqAddr("example.com:443")
+	s.AddTx(10)
+	r.TraceStream("bob", r.NewConnID(), 1)
+	h := NewHandler(ServerOptions{Secret: "s3cr3t", Registry: r})
+
 	req := httptest.NewRequest(http.MethodGet, "/dump/streams", nil)
 	req.Header.Set("Authorization", "s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	var rows []SessionDump
-	if err := json.NewDecoder(rec.Body).Decode(&rows); err != nil {
+
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Fatalf("content-type = %q", ct)
+	}
+	var wrapper struct {
+		Streams []StreamEntry `json:"streams"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&wrapper); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) < 2 {
-		t.Fatalf("rows = %d", len(rows))
+	if len(wrapper.Streams) != 2 {
+		t.Fatalf("streams = %d, want 2", len(wrapper.Streams))
+	}
+	if wrapper.Streams[0].Auth != "alice" || wrapper.Streams[0].ReqAddr != "example.com:443" {
+		t.Fatalf("stream0 = %+v", wrapper.Streams[0])
+	}
+}
+
+func TestHTTPDumpStreamsTextPlain(t *testing.T) {
+	r := NewRegistry()
+	s := r.TraceStream("alice", r.NewConnID(), 1)
+	s.SetReqAddr("example.com:443")
+	h := NewHandler(ServerOptions{Secret: "s3cr3t", Registry: r})
+
+	req := httptest.NewRequest(http.MethodGet, "/dump/streams", nil)
+	req.Header.Set("Authorization", "s3cr3t")
+	req.Header.Set("Accept", "text/plain")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Fatalf("content-type = %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "State") || !strings.Contains(body, "Hooked-Req-Addr") {
+		t.Fatalf("missing table header: %q", body)
+	}
+	// State is uppercased and the empty hooked addr renders as "-".
+	if !strings.Contains(body, "CONNECT") || !strings.Contains(body, "example.com:443") {
+		t.Fatalf("missing stream row: %q", body)
 	}
 }

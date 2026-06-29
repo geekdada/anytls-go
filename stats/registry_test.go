@@ -93,11 +93,8 @@ func TestRegistryKick(t *testing.T) {
 	if closed != 1 {
 		t.Fatalf("kick closed = %d, want 1", closed)
 	}
-	// Close runs in a goroutine. Wait briefly.
-	for i := 0; i < 100 && !a.closed.Load(); i++ {
-		runtimeGosched()
-	}
-	if !a.closed.Load() {
+	// Close runs in a goroutine. Wait for it.
+	if !waitClosed(a) {
 		t.Fatal("alice's session was not closed")
 	}
 	if b.closed.Load() {
@@ -134,24 +131,40 @@ func TestRegistryClear(t *testing.T) {
 	}
 }
 
-func TestRegistryDumpSessions(t *testing.T) {
+func TestRegistryDumpStreams(t *testing.T) {
 	r := NewRegistry()
-	r.Attach("alice", "1.1.1.1:1", &fakeSession{}).AddTx(7)
-	r.Attach("alice", "2.2.2.2:2", &fakeSession{})
-	r.Attach("bob", "3.3.3.3:3", &fakeSession{})
+	conn := r.NewConnID()
+	s1 := r.TraceStream("alice", conn, 1)
+	s1.SetReqAddr("example.com:443")
+	s1.AddTx(7)
+	r.TraceStream("alice", conn, 2)
+	r.TraceStream("bob", r.NewConnID(), 1)
 
-	rows := r.DumpSessions()
+	rows := r.DumpStreams()
 	if len(rows) != 3 {
 		t.Fatalf("rows = %d, want 3", len(rows))
 	}
-	count := map[string]int{}
-	for _, row := range rows {
-		count[row.ID]++
-		if row.Remote == "" {
-			t.Fatal("empty remote")
-		}
+
+	// Sorted by (Auth, Connection, Stream): alice/1, alice/2, bob/1.
+	if rows[0].Auth != "alice" || rows[0].Stream != 1 {
+		t.Fatalf("row0 = %+v, want alice stream 1", rows[0])
 	}
-	if count["alice"] != 2 || count["bob"] != 1 {
-		t.Fatalf("count = %#v", count)
+	if rows[0].ReqAddr != "example.com:443" || rows[0].Tx != 7 {
+		t.Fatalf("row0 req/tx = %q/%d", rows[0].ReqAddr, rows[0].Tx)
+	}
+	if rows[0].State != "connect" {
+		t.Fatalf("row0 state = %q, want connect", rows[0].State)
+	}
+	if rows[0].HookedReqAddr != "" {
+		t.Fatalf("hooked addr should always be empty, got %q", rows[0].HookedReqAddr)
+	}
+	if rows[2].Auth != "bob" {
+		t.Fatalf("last row = %+v, want bob", rows[2])
+	}
+
+	// Closing a stream removes it and marks it closed.
+	r.UntraceStream(s1)
+	if rows := r.DumpStreams(); len(rows) != 2 {
+		t.Fatalf("after untrace rows = %d, want 2", len(rows))
 	}
 }

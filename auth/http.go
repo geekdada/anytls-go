@@ -31,13 +31,17 @@ type HTTPAuthResponse struct {
 }
 
 func NewHTTPAuthenticator(url string, insecure bool) *HTTPAuthenticator {
+	// Clone the default transport (proxy-from-environment, connection pooling,
+	// sane dialer/keepalive defaults) and only override TLS verification, exactly
+	// as hysteria 2 does.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecure}
 	return &HTTPAuthenticator{
 		url: url,
 		client: &http.Client{
-			Timeout: 5 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
-			},
+			// hysteria 2 uses a fixed 10s timeout for the auth backend call.
+			Timeout:   10 * time.Second,
+			Transport: tr,
 		},
 	}
 }
@@ -59,7 +63,9 @@ func (h *HTTPAuthenticator) Authenticate(addr, authBlob string, tx int64) (strin
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// hysteria 2 treats only an exact 200 as success; any other status is an
+	// infrastructure failure that rejects the connection.
+	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return "", false, fmt.Errorf("auth backend status %d", resp.StatusCode)
 	}
@@ -68,8 +74,8 @@ func (h *HTTPAuthenticator) Authenticate(addr, authBlob string, tx int64) (strin
 	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
 		return "", false, fmt.Errorf("decode auth response: %w", err)
 	}
-	if !ar.OK || ar.ID == "" {
-		return "", false, nil
-	}
-	return ar.ID, true, nil
+	// Match hysteria 2: the backend's "ok" is authoritative and the id is passed
+	// through verbatim (an empty id is admitted and simply buckets stats under
+	// the empty key, exactly as upstream does).
+	return ar.ID, ar.OK, nil
 }

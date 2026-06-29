@@ -24,7 +24,16 @@ type Stream struct {
 	dieErr  error
 
 	reportOnce sync.Once
+
+	// Counter, when non-nil, receives this stream's own Tx/Rx byte counts
+	// (in addition to the session-wide Session.Identity). The server sets it
+	// to a per-stream stats record so /dump/streams can report per-stream
+	// traffic. Read lock-free from the data path.
+	Counter TrafficCounter
 }
+
+// ID returns the stream's per-session identifier.
+func (s *Stream) ID() uint32 { return s.id }
 
 // newStream initiates a Stream struct
 func newStream(id uint32, sess *Session) *Stream {
@@ -46,6 +55,9 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 		if tc := s.sess.Identity; tc != nil {
 			tc.AddRx(int64(n))
 		}
+		if tc := s.Counter; tc != nil {
+			tc.AddRx(int64(n))
+		}
 	}
 	return
 }
@@ -63,6 +75,9 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	n, err = s.sess.writeDataFrame(s.id, b)
 	if n > 0 {
 		if tc := s.sess.Identity; tc != nil {
+			tc.AddTx(int64(n))
+		}
+		if tc := s.Counter; tc != nil {
 			tc.AddTx(int64(n))
 		}
 	}

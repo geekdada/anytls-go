@@ -64,6 +64,33 @@ func TestHTTPAuthenticatorNon2xx(t *testing.T) {
 	}
 }
 
+func TestHTTPAuthenticatorNon200Success(t *testing.T) {
+	// hysteria treats only an exact 200 as success; a 2xx like 204 is a reject.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	a := NewHTTPAuthenticator(srv.URL, false)
+	if _, ok, err := a.Authenticate("x", "y", 0); ok || err == nil {
+		t.Fatalf("204 must reject with error, got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestHTTPAuthenticatorEmptyIDAdmitted(t *testing.T) {
+	// Matching hysteria: ok=true with an empty id still admits the client.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(HTTPAuthResponse{OK: true, ID: ""})
+	}))
+	defer srv.Close()
+
+	a := NewHTTPAuthenticator(srv.URL, false)
+	id, ok, err := a.Authenticate("x", "y", 0)
+	if !ok || err != nil || id != "" {
+		t.Fatalf("want (\"\", true, nil), got (%q, %v, %v)", id, ok, err)
+	}
+}
+
 func TestHTTPAuthenticatorTLSInsecure(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(HTTPAuthResponse{OK: true, ID: "tls-user"})

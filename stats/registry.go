@@ -1,6 +1,12 @@
 package stats
 
 import (
+	"cmp"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,13 +47,54 @@ type Registry struct {
 	mu    sync.RWMutex
 	users map[string]*UserStat
 	now   func() time.Time
+
+	streamMu sync.RWMutex
+	streams  map[*StreamStats]struct{}
+	connSeq  atomic.Uint32
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		users: make(map[string]*UserStat),
-		now:   time.Now,
+		users:   make(map[string]*UserStat),
+		now:     time.Now,
+		streams: make(map[*StreamStats]struct{}),
 	}
+}
+
+// NewConnID hands out a per-connection identifier for the /dump/streams
+// "connection" column. It is monotonic for the process lifetime.
+func (r *Registry) NewConnID() uint32 { return r.connSeq.Add(1) }
+
+// TraceStream begins tracking a single stream and returns its stats record,
+// which the caller installs on the stream so byte accounting flows in. authID
+// is the user id, connID groups streams sharing one session, streamID is the
+// per-session stream number. The record starts in the "connect" state.
+func (r *Registry) TraceStream(authID string, connID, streamID uint32) *StreamStats {
+	s := &StreamStats{
+		authID:      authID,
+		connID:      connID,
+		streamID:    streamID,
+		initialTime: r.now(),
+		now:         r.now,
+	}
+	s.state.Store(int32(StreamStateConnecting))
+	s.lastActive.Store(r.now().UnixNano())
+	r.streamMu.Lock()
+	r.streams[s] = struct{}{}
+	r.streamMu.Unlock()
+	return s
+}
+
+// UntraceStream stops tracking a stream (marking it closed first, matching
+// hysteria's deferred close transition).
+func (r *Registry) UntraceStream(s *StreamStats) {
+	if s == nil {
+		return
+	}
+	s.SetState(StreamStateClosed)
+	r.streamMu.Lock()
+	delete(r.streams, s)
+	r.streamMu.Unlock()
 }
 
 // Attach records that a session belongs to id and returns the per-user stat
@@ -169,34 +216,48 @@ func (r *Registry) Kick(ids []string) int {
 	return len(victims)
 }
 
-// SessionDump is the per-session row returned by /dump/streams.
-type SessionDump struct {
-	ID         string  `json:"id"`
-	Remote     string  `json:"remote"`
-	AgeSeconds float64 `json:"age_seconds"`
-	Tx         int64   `json:"tx"`
-	Rx         int64   `json:"rx"`
+// DumpStreams returns one StreamEntry per live stream, sorted by
+// (Auth, Connection, Stream) — identical ordering to hysteria 2.
+func (r *Registry) DumpStreams() []StreamEntry {
+	r.streamMu.RLock()
+	entries := make([]StreamEntry, 0, len(r.streams))
+	for s := range r.streams {
+		entries = append(entries, s.entry())
+	}
+	r.streamMu.RUnlock()
+
+	slices.SortFunc(entries, func(a, b StreamEntry) int {
+		if c := cmp.Compare(a.Auth, b.Auth); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Connection, b.Connection); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Stream, b.Stream)
+	})
+	return entries
 }
 
-// DumpSessions returns one row per live session.
-func (r *Registry) DumpSessions() []SessionDump {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	now := r.now()
-	var out []SessionDump
-	for id, u := range r.users {
-		tx, rx := u.Tx.Load(), u.Rx.Load()
-		u.mu.Lock()
-		for _, info := range u.sessions {
-			out = append(out, SessionDump{
-				ID:         id,
-				Remote:     info.remote,
-				AgeSeconds: now.Sub(info.started).Seconds(),
-				Tx:         tx,
-				Rx:         rx,
-			})
+// WriteStreamDump renders /dump/streams to w. When accept contains
+// "text/plain" it emits hysteria's netstat-style table; otherwise the
+// {"streams":[...]} JSON wrapper. Mirrors hysteria 2's getDumpStreams.
+func (r *Registry) WriteStreamDump(w http.ResponseWriter, accept string) {
+	entries := r.DumpStreams()
+	if strings.Contains(accept, "text/plain") {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintln(w, formatDumpStreamLine("State", "Auth", "Connection", "Stream",
+			"Req-Addr", "Hooked-Req-Addr", "TX-Bytes", "RX-Bytes", "Lifetime", "Last-Active"))
+		now := r.now()
+		for _, e := range entries {
+			fmt.Fprintln(w, e.line(now))
 		}
-		u.mu.Unlock()
+		return
 	}
-	return out
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	wrapper := struct {
+		Streams []StreamEntry `json:"streams"`
+	}{entries}
+	if err := json.NewEncoder(w).Encode(&wrapper); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }

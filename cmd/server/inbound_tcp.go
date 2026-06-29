@@ -3,6 +3,7 @@ package main
 import (
 	"anytls/proxy/padding"
 	"anytls/proxy/session"
+	"anytls/stats"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -69,6 +70,11 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 	}
 
+	var connID uint32
+	if s.stats != nil {
+		connID = s.stats.NewConnID()
+	}
+
 	sess := session.NewServerSession(c, func(stream *session.Stream) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -83,10 +89,18 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 			return
 		}
 
+		var st *stats.StreamStats
+		if s.stats != nil {
+			st = s.stats.TraceStream(id, connID, stream.ID())
+			st.SetReqAddr(destination.String())
+			stream.Counter = st
+			defer s.stats.UntraceStream(st)
+		}
+
 		if strings.Contains(destination.String(), "udp-over-tcp.arpa") {
-			proxyOutboundUoT(ctx, stream, destination)
+			proxyOutboundUoT(ctx, stream, destination, st)
 		} else {
-			proxyOutboundTCP(ctx, stream, destination)
+			proxyOutboundTCP(ctx, stream, destination, st)
 		}
 	}, &padding.DefaultPaddingFactory)
 

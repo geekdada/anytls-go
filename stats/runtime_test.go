@@ -1,7 +1,17 @@
 package stats
 
-import "runtime"
+import "time"
 
-// runtimeGosched is a tiny indirection so registry_test.go doesn't pull
-// "runtime" into its top-of-file imports (keeps the test file focused).
-func runtimeGosched() { runtime.Gosched() }
+// waitClosed polls until the fake session is closed or a short deadline passes.
+// Kick closes sessions in their own goroutine, so tests must wait for it rather
+// than assume synchronous close.
+func waitClosed(f *fakeSession) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.closed.Load() {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return f.closed.Load()
+}

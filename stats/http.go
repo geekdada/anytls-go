@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -20,9 +21,11 @@ type ServerOptions struct {
 func NewHandler(opts ServerOptions) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/traffic", auth(opts.Secret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ?clear=true returns the current stats then resets counters and frees
-		// offline entries, matching hysteria's traffic-stats semantics.
-		if r.URL.Query().Get("clear") == "true" {
+		// ?clear=<truthy> returns the current stats then resets counters and frees
+		// offline entries, matching hysteria's traffic-stats semantics. hysteria
+		// parses the value with strconv.ParseBool, so "1", "t", "true", etc. all
+		// trigger the clear.
+		if clear, _ := strconv.ParseBool(r.URL.Query().Get("clear")); clear {
 			writeJSON(w, opts.Registry.Clear())
 			return
 		}
@@ -42,10 +45,11 @@ func NewHandler(opts ServerOptions) http.Handler {
 			return
 		}
 		opts.Registry.Kick(ids)
-		w.WriteHeader(http.StatusNoContent)
+		// hysteria 2 replies with an empty 200 OK.
+		w.WriteHeader(http.StatusOK)
 	})))
 	mux.Handle("/dump/streams", auth(opts.Secret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, opts.Registry.DumpSessions())
+		opts.Registry.WriteStreamDump(w, r.Header.Get("Accept"))
 	})))
 	return mux
 }
