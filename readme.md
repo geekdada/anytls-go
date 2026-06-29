@@ -86,8 +86,10 @@ trafficStats:
 
 当 `auth.type: http` 且设置了 `url` 时，服务端会在握手阶段把凭据 POST 到外部后端，行为与 hysteria 2 一致：
 
-- 请求：`POST`，`Content-Type: application/json`，请求体 `{"addr": "客户端IP:端口", "auth": "凭据(hex)", "tx": 0}`。
+- 请求：`POST`，`Content-Type: application/json`，请求体 `{"addr": "客户端IP:端口", "auth": "凭据(hex)", "tx": 0, "variant": "geekdada/anytls-go"}`。
+  - `auth` 为客户端握手凭据的 hex 编码，即 `hex(sha256(password))`（固定 64 个十六进制字符）。
   - `tx` 在 hysteria 中为客户端声明的下行速率；AnyTLS 协议没有该字段，固定发送 `0`（即“未知”，与 hysteria 启用带宽探测时发送的值相同）。
+  - `variant` 固定为 `geekdada/anytls-go`，用于让被多种代理协议共用的后端区分出 anytls-go 的请求。
 - 响应：仅 HTTP `200` 视为成功，响应体 `{"ok": true, "id": "用户标识"}`。`ok=true` 时 `id` 原样透传（允许为空）；其余状态码或 `ok=false` 均拒绝。
 - 客户端 10s 超时；`insecure` 控制是否跳过 TLS 校验；无重试。
 - `cacheTTL > 0` 时，仅缓存**成功**结果（拒绝与后端错误始终穿透到后端），重连可跳过后端调用。

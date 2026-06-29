@@ -33,6 +33,9 @@ func TestHTTPAuthenticatorSuccess(t *testing.T) {
 	if got.Addr != "1.2.3.4:5678" || got.Auth != "deadbeef" || got.Tx != 42 {
 		t.Fatalf("backend received unexpected payload: %+v", got)
 	}
+	if got.Variant != authVariant {
+		t.Fatalf("variant = %q, want %q", got.Variant, authVariant)
+	}
 }
 
 func TestHTTPAuthenticatorRejected(t *testing.T) {

@@ -17,11 +17,16 @@ type HTTPAuthenticator struct {
 	client *http.Client
 }
 
+// authVariant identifies this protocol implementation so a backend shared by
+// multiple proxy protocols can distinguish anytls-go requests.
+const authVariant = "geekdada/anytls-go"
+
 // HTTPAuthRequest is the JSON body sent to the backend.
 type HTTPAuthRequest struct {
-	Addr string `json:"addr"`
-	Auth string `json:"auth"`
-	Tx   int64  `json:"tx"`
+	Addr    string `json:"addr"`
+	Auth    string `json:"auth"`
+	Tx      int64  `json:"tx"`
+	Variant string `json:"variant"`
 }
 
 // HTTPAuthResponse is the JSON body the backend must return.
@@ -47,7 +52,7 @@ func NewHTTPAuthenticator(url string, insecure bool) *HTTPAuthenticator {
 }
 
 func (h *HTTPAuthenticator) Authenticate(addr, authBlob string, tx int64) (string, bool, error) {
-	body, err := json.Marshal(HTTPAuthRequest{Addr: addr, Auth: authBlob, Tx: tx})
+	body, err := json.Marshal(HTTPAuthRequest{Addr: addr, Auth: authBlob, Tx: tx, Variant: authVariant})
 	if err != nil {
 		return "", false, fmt.Errorf("marshal auth request: %w", err)
 	}
