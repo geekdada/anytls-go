@@ -52,11 +52,14 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 		err = s.dieErr
 	}
 	if n > 0 {
+		// Server-side accounting: reading a stream yields the payload the client
+		// sent toward its target — the user's upload, which hysteria 2 reports as
+		// Tx. (Identity/Counter are only ever set on the server.)
 		if tc := s.sess.Identity; tc != nil {
-			tc.AddRx(int64(n))
+			tc.AddTx(int64(n))
 		}
 		if tc := s.Counter; tc != nil {
-			tc.AddRx(int64(n))
+			tc.AddTx(int64(n))
 		}
 	}
 	return
@@ -74,11 +77,14 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	}
 	n, err = s.sess.writeDataFrame(s.id, b)
 	if n > 0 {
+		// Server-side accounting: writing to a stream sends the target's payload
+		// back to the client — the user's download, which hysteria 2 reports as
+		// Rx. (Identity/Counter are only ever set on the server.)
 		if tc := s.sess.Identity; tc != nil {
-			tc.AddTx(int64(n))
+			tc.AddRx(int64(n))
 		}
 		if tc := s.Counter; tc != nil {
-			tc.AddTx(int64(n))
+			tc.AddRx(int64(n))
 		}
 	}
 	return
