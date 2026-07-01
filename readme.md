@@ -115,6 +115,11 @@ auth:
 trafficStats:
   listen: 127.0.0.1:9999
   secret: 你的密钥
+
+# 带宽限速（可选，留空或 0 表示不限速）
+bandwidth:
+  up: 100 mbps    # 服务器发送给客户端的最大速率（即客户端下载）
+  down: 20 mbps   # 服务器接收客户端的最大速率（即客户端上传）
 ```
 
 ### 外部 HTTP 鉴权后端
@@ -148,3 +153,13 @@ trafficStats:
 `connection` 对应 hysteria 的「承载该流的 QUIC 连接」：在 AnyTLS 里它是**设备级逻辑连接**——同一设备（按 `auth`+源IP 推断）的多条池化 TLS 会话共享同一个 `connection`，其下的多个流以单调递增的 `stream` 编号，正如 hysteria 一个设备保持一条连接、连接内多路复用多个流。设备的多条会话全部断开后该 `connection` 释放，重连得到新 id（无后台清理协程）。用 IP 推断设备有两点局限：① 同一 NAT 公网 IP 后、用**同一** `auth` 的多台设备会被并为一个 `connection`（用不同 `auth` 则可区分）；② 设备 IP 变化（如移动网络漫游）会得到新的 `connection` id。
 
 内存仅由 `/traffic?clear=...` 回收（无后台清理协程，与 hysteria 一致）：离线条目删除，仍有活动会话的条目就地清零。
+
+### 带宽限速
+
+配置 `bandwidth` 后，服务端对每个客户端的收发速率做上限控制，语义与 [hysteria 2](https://github.com/apernet/hysteria) 一致：
+
+- `up` 是**服务器发送给客户端**的最大速率，对应**客户端下载**速度；`down` 是**服务器接收客户端**的最大速率，对应**客户端上传**速度。
+- 留空或 `0` 表示该方向不限速；两个方向都不限速时限速器完全不介入。
+- 支持的单位（不区分大小写，可含空格，按 1000 进制）：`bps`/`b`、`kbps`/`kb`/`k`、`mbps`/`mb`/`m`、`gbps`/`gb`/`g`、`tbps`/`tb`/`t`（数值为**每秒比特数**）；纯数字按 bps 处理。
+- 限速以**设备**为单位（按 `auth`+源IP 推断，与 `/dump/streams` 的 `connection` 同一套识别逻辑）：同一设备的多条池化 TLS 会话共享同一对令牌桶，正如 hysteria 对单条 QUIC 连接限速。识别的局限与 `/dump/streams` 相同（同一 NAT 出口 IP 且用**同一** `auth` 的多台设备会被并为一个限速单位；设备 IP 变化会得到新的限速单位）。
+- 通过令牌桶（`golang.org/x/time/rate`）配合 TCP 自然背压实现：限速仅作用于握手鉴权**之后**的会话数据流，鉴权与 fallback 不受影响。线路协议未改动，客户端无需改动。
