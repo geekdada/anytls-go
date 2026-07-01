@@ -6,15 +6,19 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 type FileCertificateLoader struct {
 	certPath string
 	keyPath  string
 
-	mu      sync.RWMutex
-	cert    *tls.Certificate
-	modTime time.Time
+	mu           sync.RWMutex
+	cert         *tls.Certificate
+	modTime      time.Time
+	lastLoggedErr string
+	lastLoggedAt  time.Time
 }
 
 func NewFileCertificateLoader(certPath, keyPath string) (*FileCertificateLoader, error) {
@@ -29,12 +33,30 @@ func NewFileCertificateLoader(certPath, keyPath string) (*FileCertificateLoader,
 }
 
 func (l *FileCertificateLoader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if err := l.reloadIfChanged(); err != nil {
-		return nil, err
-	}
+	reloadErr := l.reloadIfChanged()
 	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.cert, nil
+	cert := l.cert
+	l.mu.RUnlock()
+	if reloadErr != nil {
+		if cert == nil {
+			return nil, reloadErr
+		}
+		l.logReloadError(reloadErr)
+	}
+	return cert, nil
+}
+
+func (l *FileCertificateLoader) logReloadError(err error) {
+	msg := err.Error()
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if msg == l.lastLoggedErr && now.Sub(l.lastLoggedAt) < time.Second {
+		return
+	}
+	l.lastLoggedErr = msg
+	l.lastLoggedAt = now
+	logrus.Warnf("tls cert reload failed, serving last good certificate: %v", err)
 }
 
 func (l *FileCertificateLoader) reloadIfChanged() error {
