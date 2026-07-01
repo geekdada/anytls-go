@@ -15,6 +15,10 @@ set -euo pipefail
 SERVER_BIN="anytls-server"
 CLIENT_BIN="anytls-client"
 MANAGER_NAME="anytls-manager"
+SERVICE_NAME="anytls-server"
+UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+UNIT_OVERRIDE_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
+CONFIG_FILE="/etc/anytls/server.yaml"
 REPO="${ANYTLS_REPO:-geekdada/anytls-go}"
 VERSION="${ANYTLS_VERSION:-latest}"
 INSTALL_DIR="${ANYTLS_INSTALL_DIR:-/usr/local/bin}"
@@ -171,7 +175,6 @@ CONFIG_FILE="/etc/anytls/server.yaml"
 
 MANAGER_REPO="__REPO__"
 MANAGER_INSTALL_DIR="__INSTALL_DIR__"
-MANAGER_VERSION="__VERSION__"
 DEFAULT_LISTEN="0.0.0.0:8443"
 
 INSTALLER_URL="https://raw.githubusercontent.com/${MANAGER_REPO}/main/scripts/install.sh"
@@ -205,7 +208,7 @@ upgrade_binary() {
   curl -fsSL "$INSTALLER_URL" | $sudo_cmd bash -s -- upgrade \
     --repo "$MANAGER_REPO" \
     --install-dir "$MANAGER_INSTALL_DIR" \
-    --version "$MANAGER_VERSION"
+    --version latest
 }
 
 prompt_required() {
@@ -229,6 +232,13 @@ prompt_optional_empty() {
   local val
   read -r -p "${label} (leave empty to skip): " val
   echo "$val"
+}
+
+yaml_quote() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
 }
 
 collect_config() {
@@ -295,18 +305,19 @@ collect_config() {
   esac
 
   {
-    printf 'listen: %s\n' "$listen"
+    printf 'listen: %s\n' "$(yaml_quote "$listen")"
     if [ -n "$password" ]; then
-      printf 'password: %s\n' "$password"
+      printf 'password: %s\n' "$(yaml_quote "$password")"
     fi
     if [ -n "$padding_scheme" ]; then
-      printf 'padding-scheme: %s\n' "$padding_scheme"
+      printf 'padding-scheme: %s\n' "$(yaml_quote "$padding_scheme")"
     fi
     if [ -n "$tls_cert" ]; then
-      printf 'tls:\n  cert: %s\n  key: %s\n' "$tls_cert" "$tls_key"
+      printf 'tls:\n  cert: %s\n  key: %s\n' \
+        "$(yaml_quote "$tls_cert")" "$(yaml_quote "$tls_key")"
     fi
     if [ "$auth_type" = "http" ]; then
-      printf 'auth:\n  type: http\n  http:\n    url: %s\n' "$auth_url"
+      printf 'auth:\n  type: http\n  http:\n    url: %s\n' "$(yaml_quote "$auth_url")"
       if [ "$auth_insecure" = "true" ]; then
         printf '    insecure: true\n'
       fi
@@ -318,9 +329,9 @@ collect_config() {
       fi
     fi
     if [ -n "$stats_listen" ]; then
-      printf 'trafficStats:\n  listen: %s\n' "$stats_listen"
+      printf 'trafficStats:\n  listen: %s\n' "$(yaml_quote "$stats_listen")"
       if [ -n "$stats_secret" ]; then
-        printf '  secret: %s\n' "$stats_secret"
+        printf '  secret: %s\n' "$(yaml_quote "$stats_secret")"
       fi
     fi
   }
@@ -395,7 +406,12 @@ install_service() {
   if [ -n "$config_source" ]; then
     install_config_from "$config_source"
   else
-    write_config "$(collect_config)"
+    local yaml
+    if ! yaml="$(collect_config)"; then
+      warn "configuration aborted — nothing written"
+      return 1
+    fi
+    write_config "$yaml"
   fi
 
   write_unit
@@ -487,7 +503,7 @@ show_menu() {
     echo "--------------------"
     read -r -p " choice> " choice
     case "$choice" in
-      1) install_service ;;
+      1) install_service || true ;;
       2) upgrade_and_restart ;;
       3) start_service ;;
       4) stop_service ;;
@@ -557,12 +573,10 @@ MANAGER_SCRIPT
   sed -i '' \
     -e "s|__REPO__|${REPO}|g" \
     -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
-    -e "s|__VERSION__|${VERSION}|g" \
     "$dest" 2>/dev/null || \
   sed -i \
     -e "s|__REPO__|${REPO}|g" \
     -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
-    -e "s|__VERSION__|${VERSION}|g" \
     "$dest"
 }
 
@@ -633,12 +647,39 @@ do_install() {
   fi
 }
 
+remove_systemd_service() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ ! -f "$UNIT_FILE" ]; then
+    return 0
+  fi
+
+  local sudo_cmd
+  sudo_cmd="$(maybe_sudo /etc/systemd/system)"
+
+  log "stopping $SERVICE_NAME"
+  $sudo_cmd systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  log "disabling $SERVICE_NAME"
+  $sudo_cmd systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+  log "removing unit file $UNIT_FILE"
+  $sudo_cmd rm -f "$UNIT_FILE"
+  if [ -d "$UNIT_OVERRIDE_DIR" ]; then
+    log "removing unit override dir $UNIT_OVERRIDE_DIR"
+    $sudo_cmd rm -rf "$UNIT_OVERRIDE_DIR"
+  fi
+  log "reloading systemd daemon"
+  $sudo_cmd systemctl daemon-reload
+}
+
 do_uninstall() {
   local server_path="$INSTALL_DIR/$SERVER_BIN"
   local client_path="$INSTALL_DIR/$CLIENT_BIN"
   local manager_path="$INSTALL_DIR/$MANAGER_NAME"
   local sudo_cmd removed=0
   sudo_cmd="$(maybe_sudo "$INSTALL_DIR")"
+
+  remove_systemd_service
 
   for path in "$server_path" "$client_path" "$manager_path"; do
     if [ -e "$path" ]; then
@@ -654,6 +695,10 @@ do_uninstall() {
     log "nothing to uninstall"
   else
     log "uninstalled"
+  fi
+
+  if [ -f "$CONFIG_FILE" ]; then
+    warn "config left in place: $CONFIG_FILE (remove manually if no longer needed)"
   fi
 }
 
