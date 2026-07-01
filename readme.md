@@ -73,8 +73,9 @@ auth:
   http:
     url: https://your-backend/auth
     insecure: false      # 是否跳过后端证书校验
-    cacheTTL: 60s        # 缓存成功鉴权结果的时长，留空或 0 关闭缓存
+    cacheTTL: 60s        # 缓存成功鉴权结果的时长，留空默认 10s，"0" 关闭缓存
     cacheSize: 4096      # 缓存条目上限，默认 4096
+    negativeCacheTTL: 60s # 缓存拒绝结果的时长，留空默认 60s，"0" 关闭
 
 # 流量统计 HTTP API（可选，listen 留空则不启动）
 trafficStats:
@@ -92,7 +93,7 @@ trafficStats:
   - `variant` 固定为 `geekdada/anytls-go`，用于让被多种代理协议共用的后端区分出 anytls-go 的请求。
 - 响应：仅 HTTP `200` 视为成功，响应体 `{"ok": true, "id": "用户标识"}`。`ok=true` 时 `id` 原样透传（允许为空）；其余状态码或 `ok=false` 均拒绝。
 - 客户端 10s 超时；`insecure` 控制是否跳过 TLS 校验；无重试。
-- `cacheTTL > 0` 时，仅缓存**成功**结果（拒绝与后端错误始终穿透到后端），重连可跳过后端调用。
+- `cacheTTL > 0` 时缓存**成功**结果，重连可跳过后端调用（留空默认 `10s`，设为 `"0"` 关闭）；同时按 `negativeCacheTTL` 缓存**拒绝**结果（`ok=false`），使不断重连的失效凭据不再反复打到后端（留空默认 `60s`，设为 `"0"` 可关闭）。**后端错误（非 200/网络故障）始终穿透**，不会被缓存，故后端故障不会误锁合法用户。成功与拒绝使用相互独立的缓存，避免大量不同的错误凭据挤占正常缓存条目。
 
 返回的 `id` 是流量统计的稳定键。未配置 HTTP 鉴权时，使用单一 `password`，其 `id` 为由密码哈希派生的稳定合成值（不泄露密码）。
 
