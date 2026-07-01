@@ -27,8 +27,27 @@ func TestPasswordAuthenticatorAcceptsHexHash(t *testing.T) {
 
 func TestPasswordAuthenticatorRejectsBadHash(t *testing.T) {
 	a := NewPasswordAuthenticator("hunter2")
-	if _, ok, _ := a.Authenticate("x", "00", 0); ok {
+	sum := sha256.Sum256([]byte("hunter2"))
+	blob := hex.EncodeToString(sum[:])
+	wrong := blob[:len(blob)-1] + "0"
+	if _, ok, _ := a.Authenticate("x", wrong, 0); ok {
 		t.Fatal("expected rejection of wrong credential")
+	}
+}
+
+func TestPasswordAuthenticatorRejectsWrongLength(t *testing.T) {
+	a := NewPasswordAuthenticator("hunter2")
+	if _, ok, _ := a.Authenticate("x", "00", 0); ok {
+		t.Fatal("expected rejection of wrong-length credential")
+	}
+}
+
+func TestPasswordAuthenticatorRejectsUppercaseHex(t *testing.T) {
+	a := NewPasswordAuthenticator("hunter2")
+	sum := sha256.Sum256([]byte("hunter2"))
+	blob := strings.ToUpper(hex.EncodeToString(sum[:]))
+	if _, ok, _ := a.Authenticate("x", blob, 0); ok {
+		t.Fatal("expected rejection of uppercase hex credential")
 	}
 }
 
