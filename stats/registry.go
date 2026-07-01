@@ -197,11 +197,10 @@ func (r *Registry) Attach(id, remote string, sess Kickable) *UserStat {
 		u = &UserStat{ID: id, sessions: make(map[Kickable]*sessionInfo)}
 		r.users[id] = u
 	}
-	r.mu.Unlock()
-
 	u.mu.Lock()
 	u.sessions[sess] = &sessionInfo{remote: remote, started: r.now()}
 	u.mu.Unlock()
+	r.mu.Unlock()
 	return u
 }
 
@@ -246,21 +245,19 @@ func (r *Registry) Snapshot() map[string]TrafficEntry {
 // them would orphan the live counters and break kick. Offline entries are
 // removed outright, bounding memory.
 func (r *Registry) Clear() map[string]TrafficEntry {
-	snap := r.Snapshot()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	out := make(map[string]TrafficEntry, len(r.users))
 	for id, u := range r.users {
 		u.mu.Lock()
 		live := len(u.sessions)
 		u.mu.Unlock()
+		out[id] = TrafficEntry{Tx: u.Tx.Swap(0), Rx: u.Rx.Swap(0)}
 		if live == 0 {
 			delete(r.users, id)
-		} else {
-			u.Tx.Store(0)
-			u.Rx.Store(0)
 		}
 	}
-	return snap
+	return out
 }
 
 // Online returns the number of online devices for each id that has at least one

@@ -1,9 +1,11 @@
 package stats
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type fakeSession struct {
@@ -129,6 +131,102 @@ func TestRegistryClear(t *testing.T) {
 	// alice's live session is still kickable (UserStat pointer intact).
 	if closed := r.Kick([]string{"alice"}); closed != 1 {
 		t.Fatalf("alice should still be kickable, kicked %d", closed)
+	}
+}
+
+func TestRegistryClearConcurrentAccounting(t *testing.T) {
+	r := NewRegistry()
+	s := &fakeSession{}
+	u := r.Attach("alice", "1.1.1.1:1", s)
+
+	var addedTx atomic.Int64
+	var addedRx atomic.Int64
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				u.AddTx(1)
+				addedTx.Add(1)
+				u.AddRx(1)
+				addedRx.Add(1)
+			}
+		}
+	}()
+
+	var clearedTx atomic.Int64
+	var clearedRx atomic.Int64
+	for i := 0; i < 500; i++ {
+		snap := r.Clear()
+		if e, ok := snap["alice"]; ok {
+			clearedTx.Add(e.Tx)
+			clearedRx.Add(e.Rx)
+		}
+	}
+
+	close(stop)
+	final := r.Snapshot()["alice"]
+
+	totalTx := clearedTx.Load() + final.Tx
+	totalRx := clearedRx.Load() + final.Rx
+	if totalTx != addedTx.Load() {
+		t.Fatalf("tx accounting: cleared+final=%d, added=%d", totalTx, addedTx.Load())
+	}
+	if totalRx != addedRx.Load() {
+		t.Fatalf("rx accounting: cleared+final=%d, added=%d", totalRx, addedRx.Load())
+	}
+}
+
+func TestRegistryAttachClearRace(t *testing.T) {
+	r := NewRegistry()
+	const workers = 4
+	const attachIters = 2000
+
+	var orphans atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					r.Clear()
+				}
+			}
+		}()
+	}
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < attachIters; i++ {
+				id := fmt.Sprintf("user-%d-%d", worker, i)
+				s := &fakeSession{}
+				r.Attach(id, "1.2.3.4:1", s)
+				if r.Kick([]string{id}) != 1 {
+					orphans.Add(1)
+				} else if r.Online()[id] != 1 {
+					orphans.Add(1)
+				}
+				r.Detach(id, s)
+			}
+		}(w)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	if n := orphans.Load(); n > 0 {
+		t.Fatalf("attach/clear race orphaned %d sessions", n)
 	}
 }
 
