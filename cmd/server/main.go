@@ -119,7 +119,10 @@ func main() {
 		logrus.Infoln("[TLS] using auto-generated self-signed certificate")
 	}
 
-	registry := stats.NewRegistry()
+	var registry *stats.Registry
+	if cfg.StatsEnabled() {
+		registry = stats.NewRegistry()
+	}
 
 	upBps, downBps, err := cfg.BandwidthLimits()
 	if err != nil {
