@@ -12,6 +12,35 @@
 
 [URI 格式](./docs/uri_scheme.md)
 
+## 一键安装
+
+从 GitHub Release 下载预编译二进制（`anytls-server`、`anytls-client`），并安装 `anytls-manager`（Linux systemd 服务管理工具）：
+
+```bash
+curl -fsSL https://308.li/anytls-go | bash -s -- install
+```
+
+安装完成后，在 Linux 上可用交互式菜单配置并注册 systemd 服务：
+
+```bash
+anytls-manager
+```
+
+也可直接使用已有配置文件：
+
+```bash
+anytls-manager install-service -c /path/to/server.yaml
+```
+
+升级与卸载：
+
+```bash
+curl -fsSL https://308.li/anytls-go | bash -s -- upgrade
+curl -fsSL https://308.li/anytls-go | bash -s -- uninstall
+```
+
+脚本源码见 [`scripts/install.sh`](scripts/install.sh)。默认安装目录为 `/usr/local/bin`，配置文件写入 `/etc/anytls/server.yaml`。
+
 ## 快速食用方法
 
 为了方便，示例服务器和客户端默认采用不安全的配置，该配置假设您不会遭遇 TLS 中间人攻击（这种情况偶尔发生在网络接入层，在骨干网络上几乎不可能实现）；否则，您的通信内容可能会被中间人截获。
