@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadFile(t *testing.T) {
@@ -89,11 +90,20 @@ func TestAuthCacheTTL(t *testing.T) {
 	}
 }
 
-func TestAuthCacheTTLEmptyDisabled(t *testing.T) {
+func TestAuthCacheTTLDefault(t *testing.T) {
 	c := Default()
 	ttl, err := c.AuthCacheTTL()
+	if err != nil || ttl != 10*time.Second {
+		t.Fatalf("empty TTL should default to 10s, got (%v, %v)", ttl, err)
+	}
+}
+
+func TestAuthCacheTTLZeroDisables(t *testing.T) {
+	c := Default()
+	c.Auth.HTTP.CacheTTL = "0"
+	ttl, err := c.AuthCacheTTL()
 	if err != nil || ttl != 0 {
-		t.Fatalf("empty TTL should be (0, nil), got (%v, %v)", ttl, err)
+		t.Fatalf(`cacheTTL "0" should disable, got (%v, %v)`, ttl, err)
 	}
 }
 
@@ -111,5 +121,85 @@ func TestAuthCacheTTLInvalidFailsLoad(t *testing.T) {
 	}
 	if _, err := LoadFile(path); err == nil {
 		t.Fatal("expected load to fail on bad cacheTTL")
+	}
+}
+
+func TestAuthNegativeCacheTTLExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `auth:
+  type: http
+  http:
+    url: http://b/auth
+    cacheTTL: 60s
+    negativeCacheTTL: 5s
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	neg, err := c.AuthNegativeCacheTTL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if neg != 5*time.Second {
+		t.Fatalf("negTTL = %v, want 5s", neg)
+	}
+}
+
+func TestAuthNegativeCacheTTLDerivedDefault(t *testing.T) {
+	c := Default()
+	c.Auth.HTTP.CacheTTL = "60s"
+	neg, err := c.AuthNegativeCacheTTL()
+	if err != nil || neg != 60*time.Second {
+		t.Fatalf("derived default = (%v, %v), want 60s", neg, err)
+	}
+}
+
+func TestAuthNegativeCacheTTLDefaultWithPositiveDefault(t *testing.T) {
+	c := Default() // cacheTTL unset => 10s positive
+	neg, err := c.AuthNegativeCacheTTL()
+	if err != nil || neg != 60*time.Second {
+		t.Fatalf("derived default = (%v, %v), want 60s", neg, err)
+	}
+}
+
+func TestAuthNegativeCacheTTLDisabledWhenNoPositive(t *testing.T) {
+	c := Default()
+	c.Auth.HTTP.CacheTTL = "0"
+	neg, err := c.AuthNegativeCacheTTL()
+	if err != nil || neg != 0 {
+		t.Fatalf("positive caching off => neg 0, got (%v, %v)", neg, err)
+	}
+}
+
+func TestAuthNegativeCacheTTLExplicitZeroDisables(t *testing.T) {
+	c := Default()
+	c.Auth.HTTP.CacheTTL = "60s"
+	c.Auth.HTTP.NegativeCacheTTL = "0"
+	neg, err := c.AuthNegativeCacheTTL()
+	if err != nil || neg != 0 {
+		t.Fatalf(`negativeCacheTTL "0" should disable, got (%v, %v)`, neg, err)
+	}
+}
+
+func TestAuthNegativeCacheTTLInvalidFailsLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `auth:
+  type: http
+  http:
+    url: http://b/auth
+    cacheTTL: 60s
+    negativeCacheTTL: nonsense
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("expected load to fail on bad negativeCacheTTL")
 	}
 }
