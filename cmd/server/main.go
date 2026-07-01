@@ -79,8 +79,9 @@ func main() {
 			if size <= 0 {
 				size = 4096
 			}
-			authn = auth.NewCachingAuthenticator(authn, ttl, size)
-			logrus.Infoln("[Auth] result cache enabled, ttl", ttl, "size", size)
+			negTTL, _ := cfg.AuthNegativeCacheTTL()
+			authn = auth.NewCachingAuthenticator(authn, ttl, size, negTTL)
+			logrus.Infoln("[Auth] result cache enabled, ttl", ttl, "size", size, "negativeTTL", negTTL)
 		}
 	default:
 		if cfg.Password == "" {

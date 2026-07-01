@@ -46,7 +46,7 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	}
 	id, ok, authErr := s.auth.Authenticate(c.RemoteAddr().String(), hex.EncodeToString(by), 0)
 	if authErr != nil {
-		logrus.Warnln("auth backend error:", authErr)
+		logrus.Warnln("auth backend error from", c.RemoteAddr(), ":", authErr)
 	}
 	if !ok {
 		b.Resize(0, n)
