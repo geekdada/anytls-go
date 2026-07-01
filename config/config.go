@@ -97,6 +97,9 @@ func LoadFile(path string) (*Config, error) {
 	if err := c.ValidateTLS(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
+	if err := c.ValidateAuth(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
 	return c, nil
 }
 
@@ -155,6 +158,21 @@ func (c *Config) StatsEnabled() bool {
 // TLSEnabled reports whether TLS certificate files are configured.
 func (c *Config) TLSEnabled() bool {
 	return c.TLS.Cert != "" && c.TLS.Key != ""
+}
+
+// ValidateAuth ensures auth.type and its dependent fields are consistent.
+func (c *Config) ValidateAuth() error {
+	switch c.Auth.Type {
+	case "", "password":
+		return nil
+	case "http":
+		if c.Auth.HTTP.URL == "" {
+			return fmt.Errorf("auth.type http requires auth.http.url")
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid auth.type %q", c.Auth.Type)
+	}
 }
 
 // ValidateTLS ensures cert and key are both set or both omitted.

@@ -42,6 +42,94 @@ trafficStats:
 	}
 }
 
+func TestLoadFileAuthValidation(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("http without url", func(t *testing.T) {
+		path := filepath.Join(dir, "http-no-url.yaml")
+		body := `password: hunter2
+auth:
+  type: http
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Fatal("expected load to fail when auth.type http omits auth.http.url")
+		}
+	})
+
+	t.Run("unknown auth type", func(t *testing.T) {
+		path := filepath.Join(dir, "unknown-auth.yaml")
+		body := `password: hunter2
+auth:
+  type: htpp
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Fatal("expected load to fail on unrecognized auth.type")
+		}
+	})
+
+	t.Run("http with url", func(t *testing.T) {
+		path := filepath.Join(dir, "http-ok.yaml")
+		body := `auth:
+  type: http
+  http:
+    url: http://backend/auth
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.UseHTTPAuth() {
+			t.Fatal("expected UseHTTPAuth for valid http auth config")
+		}
+	})
+
+	t.Run("password with password", func(t *testing.T) {
+		path := filepath.Join(dir, "password-ok.yaml")
+		body := `password: hunter2
+auth:
+  type: password
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.UseHTTPAuth() {
+			t.Fatal("password auth should not enable UseHTTPAuth")
+		}
+		if c.Password != "hunter2" {
+			t.Fatalf("password = %q, want hunter2", c.Password)
+		}
+	})
+
+	t.Run("empty auth block", func(t *testing.T) {
+		path := filepath.Join(dir, "empty-auth.yaml")
+		body := `password: hunter2
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.UseHTTPAuth() {
+			t.Fatal("empty auth block should not enable UseHTTPAuth")
+		}
+	})
+}
+
 func TestLoadFileEmpty(t *testing.T) {
 	c, err := LoadFile("")
 	if err != nil {
