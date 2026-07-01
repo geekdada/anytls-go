@@ -67,6 +67,11 @@ listen: 0.0.0.0:8443
 password: 你的密码
 padding-scheme: ./padding.txt   # 可选，padding 方案文件路径
 
+# TLS 证书（可选，留空则启动时自动生成临时自签证书；证书文件变更后无需重启）
+tls:
+  cert: /path/to/server.crt
+  key: /path/to/server.key
+
 # 外部 HTTP 鉴权（可选，留空则使用 password）
 auth:
   type: http

@@ -203,3 +203,52 @@ func TestAuthNegativeCacheTTLInvalidFailsLoad(t *testing.T) {
 		t.Fatal("expected load to fail on bad negativeCacheTTL")
 	}
 }
+
+func TestLoadFileTLS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	body := `listen: ":9000"
+password: hunter2
+tls:
+  cert: /etc/ssl/server.crt
+  key: /etc/ssl/server.key
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.TLSEnabled() {
+		t.Fatal("expected TLSEnabled")
+	}
+	if c.TLS.Cert != "/etc/ssl/server.crt" || c.TLS.Key != "/etc/ssl/server.key" {
+		t.Fatalf("tls fields wrong: %#v", c.TLS)
+	}
+}
+
+func TestValidateTLSPartial(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `password: x
+tls:
+  cert: only.crt
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("expected load to fail when only tls.cert is set")
+	}
+}
+
+func TestValidateTLSDefaultDisabled(t *testing.T) {
+	c := Default()
+	if c.TLSEnabled() {
+		t.Fatal("default config should not enable TLS files")
+	}
+	if err := c.ValidateTLS(); err != nil {
+		t.Fatal(err)
+	}
+}

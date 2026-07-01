@@ -14,11 +14,17 @@ const (
 )
 
 type Config struct {
-	Listen         string             `yaml:"listen"`
-	Password       string             `yaml:"password"`
-	PaddingScheme  string             `yaml:"padding-scheme"`
-	Auth           AuthConfig         `yaml:"auth"`
-	TrafficStats   TrafficStatsConfig `yaml:"trafficStats"`
+	Listen        string             `yaml:"listen"`
+	Password      string             `yaml:"password"`
+	PaddingScheme string             `yaml:"padding-scheme"`
+	TLS           TLSConfig          `yaml:"tls"`
+	Auth          AuthConfig         `yaml:"auth"`
+	TrafficStats  TrafficStatsConfig `yaml:"trafficStats"`
+}
+
+type TLSConfig struct {
+	Cert string `yaml:"cert"`
+	Key  string `yaml:"key"`
 }
 
 type AuthConfig struct {
@@ -70,6 +76,9 @@ func LoadFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	if _, err := c.AuthNegativeCacheTTL(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
+	if err := c.ValidateTLS(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	return c, nil
@@ -125,4 +134,19 @@ func (c *Config) UseHTTPAuth() bool {
 // StatsEnabled reports whether the traffic-stats HTTP API should be started.
 func (c *Config) StatsEnabled() bool {
 	return c.TrafficStats.Listen != ""
+}
+
+// TLSEnabled reports whether TLS certificate files are configured.
+func (c *Config) TLSEnabled() bool {
+	return c.TLS.Cert != "" && c.TLS.Key != ""
+}
+
+// ValidateTLS ensures cert and key are both set or both omitted.
+func (c *Config) ValidateTLS() error {
+	hasCert := c.TLS.Cert != ""
+	hasKey := c.TLS.Key != ""
+	if hasCert != hasKey {
+		return fmt.Errorf("tls.cert and tls.key must both be set or both be omitted")
+	}
+	return nil
 }

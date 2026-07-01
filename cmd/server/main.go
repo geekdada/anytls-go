@@ -98,11 +98,23 @@ func main() {
 		logrus.Fatalln("listen server tcp:", err)
 	}
 
-	tlsCert, _ := util.GenerateKeyPair(time.Now, "")
-	tlsConfig := &tls.Config{
-		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	var tlsConfig *tls.Config
+	if cfg.TLSEnabled() {
+		loader, err := util.NewFileCertificateLoader(cfg.TLS.Cert, cfg.TLS.Key)
+		if err != nil {
+			logrus.Fatalln("tls:", err)
+		}
+		tlsConfig = &tls.Config{GetCertificate: loader.GetCertificate}
+		logrus.Infoln("[TLS] using certificate", cfg.TLS.Cert)
+	} else {
+		tlsCert, err := util.GenerateKeyPair(time.Now, "")
+		if err != nil {
+			logrus.Fatalln("generate tls cert:", err)
+		}
+		tlsConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return tlsCert, nil
-		},
+		}}
+		logrus.Infoln("[TLS] using auto-generated self-signed certificate")
 	}
 
 	registry := stats.NewRegistry()
