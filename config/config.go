@@ -3,6 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -20,6 +23,16 @@ type Config struct {
 	TLS           TLSConfig          `yaml:"tls"`
 	Auth          AuthConfig         `yaml:"auth"`
 	TrafficStats  TrafficStatsConfig `yaml:"trafficStats"`
+	Bandwidth     BandwidthConfig    `yaml:"bandwidth"`
+}
+
+// BandwidthConfig caps the per-device transfer rate, matching hysteria 2's
+// bandwidth block. Up is the rate the server sends to a client (the client's
+// download); Down is what the server receives (the client's upload). An empty
+// value or "0" means unlimited in that direction.
+type BandwidthConfig struct {
+	Up   string `yaml:"up"`
+	Down string `yaml:"down"`
 }
 
 type TLSConfig struct {
@@ -76,6 +89,9 @@ func LoadFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	if _, err := c.AuthNegativeCacheTTL(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
+	if _, _, err := c.BandwidthLimits(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	if err := c.ValidateTLS(); err != nil {
@@ -149,4 +165,52 @@ func (c *Config) ValidateTLS() error {
 		return fmt.Errorf("tls.cert and tls.key must both be set or both be omitted")
 	}
 	return nil
+}
+
+var bandwidthRegex = regexp.MustCompile(`^(\d+)\s*([a-zA-Z]*)$`)
+
+// parseBandwidth converts a hysteria-style bandwidth string (e.g. "100 mbps",
+// "1gbps", "500kb") into bits per second. Empty or a zero value returns 0,
+// meaning unlimited. A bare integer is treated as bits per second.
+func parseBandwidth(s string) (uint64, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return 0, nil
+	}
+	m := bandwidthRegex.FindStringSubmatch(s)
+	if m == nil {
+		return 0, fmt.Errorf("invalid bandwidth %q", s)
+	}
+	v, err := strconv.ParseUint(m[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid bandwidth %q: %w", s, err)
+	}
+	switch m[2] {
+	case "", "bps", "b":
+		return v, nil
+	case "kbps", "kb", "k":
+		return v * 1000, nil
+	case "mbps", "mb", "m":
+		return v * 1000 * 1000, nil
+	case "gbps", "gb", "g":
+		return v * 1000 * 1000 * 1000, nil
+	case "tbps", "tb", "t":
+		return v * 1000 * 1000 * 1000 * 1000, nil
+	default:
+		return 0, fmt.Errorf("unsupported bandwidth unit %q", m[2])
+	}
+}
+
+// BandwidthLimits parses the configured up/down caps into bits per second.
+// A returned value of 0 means that direction is unlimited.
+func (c *Config) BandwidthLimits() (up, down uint64, err error) {
+	up, err = parseBandwidth(c.Bandwidth.Up)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bandwidth.up: %w", err)
+	}
+	down, err = parseBandwidth(c.Bandwidth.Down)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bandwidth.down: %w", err)
+	}
+	return up, down, nil
 }

@@ -252,3 +252,84 @@ func TestValidateTLSDefaultDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestParseBandwidth(t *testing.T) {
+	cases := []struct {
+		in   string
+		want uint64
+	}{
+		{"", 0},
+		{"0", 0},
+		{"100", 100},
+		{"100bps", 100},
+		{"100 b", 100},
+		{"1kbps", 1000},
+		{"1kb", 1000},
+		{"1k", 1000},
+		{"1 mbps", 1_000_000},
+		{"5mb", 5_000_000},
+		{"2m", 2_000_000},
+		{"1gbps", 1_000_000_000},
+		{"1 GB", 1_000_000_000},
+		{"1g", 1_000_000_000},
+		{"1tbps", 1_000_000_000_000},
+		{"1TB", 1_000_000_000_000},
+		{"3 T", 3_000_000_000_000},
+	}
+	for _, tc := range cases {
+		got, err := parseBandwidth(tc.in)
+		if err != nil {
+			t.Fatalf("parseBandwidth(%q) error: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("parseBandwidth(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParseBandwidthInvalid(t *testing.T) {
+	for _, in := range []string{"abc", "10xb", "mbps", "-5", "1.5mbps"} {
+		if _, err := parseBandwidth(in); err == nil {
+			t.Fatalf("parseBandwidth(%q) expected error", in)
+		}
+	}
+}
+
+func TestBandwidthLimits(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `password: x
+bandwidth:
+  up: 100 mbps
+  down: 20mbps
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, down, err := c.BandwidthLimits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up != 100_000_000 || down != 20_000_000 {
+		t.Fatalf("limits = (%d, %d), want (100000000, 20000000)", up, down)
+	}
+}
+
+func TestBandwidthLimitsInvalidFailsLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `password: x
+bandwidth:
+  up: nonsense
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("expected load to fail on bad bandwidth.up")
+	}
+}

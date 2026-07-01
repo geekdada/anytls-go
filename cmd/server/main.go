@@ -8,11 +8,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"anytls/auth"
 	"anytls/config"
+	"anytls/limiter"
 	"anytls/proxy/padding"
 	"anytls/stats"
 	"anytls/util"
@@ -119,6 +121,15 @@ func main() {
 
 	registry := stats.NewRegistry()
 
+	upBps, downBps, err := cfg.BandwidthLimits()
+	if err != nil {
+		logrus.Fatalln(err)
+	}
+	limits := limiter.NewRegistry(upBps, downBps)
+	if limits != nil {
+		logrus.Infoln("[Bandwidth] up", bandwidthLabel(upBps), "down", bandwidthLabel(downBps), "(per device)")
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -135,7 +146,7 @@ func main() {
 		}()
 	}
 
-	server := NewMyServer(tlsConfig, authn, registry)
+	server := NewMyServer(tlsConfig, authn, registry, limits)
 
 	go func() {
 		<-ctx.Done()
@@ -154,4 +165,12 @@ func main() {
 		}
 		go handleTcpConnection(ctx, c, server)
 	}
+}
+
+// bandwidthLabel renders a bits-per-second cap for logging; 0 means unlimited.
+func bandwidthLabel(bps uint64) string {
+	if bps == 0 {
+		return "unlimited"
+	}
+	return strconv.FormatUint(bps, 10) + " bps"
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"anytls/limiter"
 	"anytls/proxy/padding"
 	"anytls/proxy/session"
 	"anytls/stats"
@@ -74,6 +75,12 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	if s.stats != nil {
 		conn = s.stats.AcquireConn(id, c.RemoteAddr().String())
 		defer s.stats.ReleaseConn(conn)
+	}
+
+	if s.limits != nil {
+		dev := s.limits.Acquire(id, c.RemoteAddr().String())
+		defer s.limits.Release(dev)
+		c = limiter.WrapConn(c, dev)
 	}
 
 	sess := session.NewServerSession(c, func(stream *session.Stream) {
