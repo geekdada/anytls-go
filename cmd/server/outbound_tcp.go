@@ -2,6 +2,7 @@ package main
 
 import (
 	"anytls/proxy"
+	"anytls/stats"
 	"context"
 	"net"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr) error {
+func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats) error {
 	c, err := proxy.SystemDialer.DialContext(ctx, "tcp", destination.String())
 	if err != nil {
 		logrus.Debugln("proxyOutboundTCP DialContext:", err)
@@ -25,11 +26,14 @@ func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksadd
 	if err != nil {
 		return err
 	}
+	if st != nil {
+		st.SetState(stats.StreamStateEstablished)
+	}
 
 	return bufio.CopyConn(ctx, conn, c)
 }
 
-func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr) error {
+func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats) error {
 	request, err := uot.ReadRequest(conn)
 	if err != nil {
 		logrus.Debugln("proxyOutboundUoT ReadRequest:", err)
@@ -46,6 +50,9 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksadd
 	err = N.ReportHandshakeSuccess(conn)
 	if err != nil {
 		return err
+	}
+	if st != nil {
+		st.SetState(stats.StreamStateEstablished)
 	}
 
 	return bufio.CopyPacketConn(ctx, uot.NewConn(conn, *request), bufio.NewPacketConn(c))
