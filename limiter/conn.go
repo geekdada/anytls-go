@@ -53,7 +53,40 @@ func (c *limitedConn) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// WaitWrite blocks until the up bucket grants n bytes. Session control-frame
+// writers call this before arming a write deadline so rate-limit backpressure
+// does not count against the stuck-peer timeout.
+func (c *limitedConn) WaitWrite(n int) error {
+	if c.up == nil || n <= 0 {
+		return nil
+	}
+	burst := c.up.Burst()
+	for n > 0 {
+		chunk := n
+		if chunk > burst {
+			chunk = burst
+		}
+		if err := c.up.WaitN(c.ctx, chunk); err != nil {
+			return err
+		}
+		n -= chunk
+	}
+	return nil
+}
+
 func (c *limitedConn) Write(b []byte) (int, error) {
+	if c.up == nil {
+		return c.Conn.Write(b)
+	}
+	if err := c.WaitWrite(len(b)); err != nil {
+		return 0, err
+	}
+	return c.WriteUnlimited(b)
+}
+
+// WriteUnlimited writes b without waiting on the up bucket. The caller must
+// have already acquired tokens via WaitWrite.
+func (c *limitedConn) WriteUnlimited(b []byte) (int, error) {
 	if c.up == nil {
 		return c.Conn.Write(b)
 	}
@@ -63,9 +96,6 @@ func (c *limitedConn) Write(b []byte) (int, error) {
 		chunk := len(b)
 		if chunk > burst {
 			chunk = burst
-		}
-		if err := c.up.WaitN(c.ctx, chunk); err != nil {
-			return written, err
 		}
 		n, err := c.Conn.Write(b[:chunk])
 		written += n

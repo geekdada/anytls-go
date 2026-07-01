@@ -125,3 +125,49 @@ func TestReadCappedToBurst(t *testing.T) {
 		t.Fatalf("burst = %d, want >= %d", wrapped.down.Burst(), minBurst)
 	}
 }
+
+func TestWaitWriteBeforeWriteUnlimitedHonorsWriteDeadline(t *testing.T) {
+	const rateBps = 8000 // 1000 B/s after /8
+	r := NewRegistry(rateBps, 0)
+	d := r.Acquire("u", "1.1.1.1:1")
+
+	server, client := net.Pipe()
+	t.Cleanup(func() {
+		server.Close()
+		client.Close()
+	})
+	lc := WrapConn(server, d).(*limitedConn)
+
+	go io.Copy(io.Discard, client)
+
+	// Drain the initial burst so the next write must wait for token refill.
+	if _, err := lc.Write(make([]byte, minBurst)); err != nil {
+		t.Fatalf("burst drain write: %v", err)
+	}
+
+	const payloadLen = 200
+	payload := make([]byte, payloadLen)
+
+	waitStart := time.Now()
+	if err := lc.WaitWrite(payloadLen); err != nil {
+		t.Fatalf("WaitWrite: %v", err)
+	}
+	waitElapsed := time.Since(waitStart)
+	if waitElapsed < 50*time.Millisecond {
+		t.Fatalf("expected rate-limit wait before deadline, took only %v", waitElapsed)
+	}
+
+	if err := lc.SetWriteDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	writeStart := time.Now()
+	if _, err := lc.WriteUnlimited(payload); err != nil {
+		t.Fatalf("WriteUnlimited after WaitWrite: %v (wait=%v write=%v)", err, waitElapsed, time.Since(writeStart))
+	}
+	if err := lc.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if writeElapsed := time.Since(writeStart); writeElapsed > 400*time.Millisecond {
+		t.Fatalf("write phase should not include throttle wait, took %v", writeElapsed)
+	}
+}
