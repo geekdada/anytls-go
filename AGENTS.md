@@ -11,6 +11,8 @@ The authoritative protocol spec is `docs/protocol.md` (Chinese). Read it before 
 ## Commands
 
 ```bash
+make help   # list all targets; `make` defaults to help
+
 # Build
 go build -o anytls-server ./cmd/server
 go build -o anytls-client ./cmd/client
