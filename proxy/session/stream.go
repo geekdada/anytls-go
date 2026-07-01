@@ -32,9 +32,6 @@ type Stream struct {
 	Counter TrafficCounter
 }
 
-// ID returns the stream's per-session identifier.
-func (s *Stream) ID() uint32 { return s.id }
-
 // newStream initiates a Stream struct
 func newStream(id uint32, sess *Session) *Stream {
 	s := new(Stream)

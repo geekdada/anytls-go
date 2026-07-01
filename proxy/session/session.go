@@ -67,6 +67,16 @@ type TrafficCounter interface {
 	AddRx(int64)
 }
 
+// Optional conn extensions implemented by limiter.WrapConn; asserted here to
+// avoid importing the limiter package from session.
+type connWriteRateWaiter interface {
+	WaitWrite(n int) error
+}
+
+type connUnlimitedWriter interface {
+	WriteUnlimited(b []byte) (int, error)
+}
+
 func NewClientSession(conn net.Conn, _padding *atomic.TypedValue[*padding.PaddingFactory]) *Session {
 	s := &Session{
 		conn:        conn,
@@ -413,21 +423,32 @@ func (s *Session) writeControlFrame(frame frame) (int, error) {
 	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
 	buffer.Write(frame.data)
 
-	s.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+	payload := buffer.Bytes()
+	bypassLimit := false
+	if waiter, ok := s.conn.(connWriteRateWaiter); ok {
+		if err := waiter.WaitWrite(len(payload)); err != nil {
+			buffer.Release()
+			s.Close()
+			return 0, err
+		}
+		bypassLimit = true
+	}
 
-	_, err := s.writeConn(buffer.Bytes())
+	_, err := s.doWriteConn(payload, true, bypassLimit)
 	buffer.Release()
 	if err != nil {
 		s.Close()
 		return 0, err
 	}
 
-	s.conn.SetWriteDeadline(time.Time{})
-
 	return dataLen, nil
 }
 
 func (s *Session) writeConn(b []byte) (n int, err error) {
+	return s.doWriteConn(b, false, false)
+}
+
+func (s *Session) doWriteConn(b []byte, controlDeadline, bypassLimit bool) (n int, err error) {
 	s.connLock.Lock()
 	defer s.connLock.Unlock()
 
@@ -437,6 +458,20 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 	} else if len(s.buffer) > 0 {
 		b = slices.Concat(s.buffer, b)
 		s.buffer = nil
+	}
+
+	if controlDeadline {
+		s.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+		defer s.conn.SetWriteDeadline(time.Time{})
+	}
+
+	writeFn := func(p []byte) (int, error) {
+		if bypassLimit {
+			if w, ok := s.conn.(connUnlimitedWriter); ok {
+				return w.WriteUnlimited(p)
+			}
+		}
+		return s.conn.Write(p)
 	}
 
 	// calulate & send padding
@@ -456,7 +491,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 				}
 				// logrus.Debugln(pkt, "write", l, "len", remainPayloadLen, "remain", remainPayloadLen-l)
 				if remainPayloadLen > l { // this packet is all payload
-					_, err = s.conn.Write(b[:l])
+					_, err = writeFn(b[:l])
 					if err != nil {
 						return 0, err
 					}
@@ -471,7 +506,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
 						b = slices.Concat(b, padding)
 					}
-					_, err = s.conn.Write(b)
+					_, err = writeFn(b)
 					if err != nil {
 						return 0, err
 					}
@@ -482,7 +517,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 					padding[0] = cmdWaste
 					binary.BigEndian.PutUint32(padding[1:5], 0)
 					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
-					_, err = s.conn.Write(padding)
+					_, err = writeFn(padding)
 					if err != nil {
 						return 0, err
 					}
@@ -493,7 +528,7 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 			if len(b) == 0 {
 				return
 			} else {
-				n2, err := s.conn.Write(b)
+				n2, err := writeFn(b)
 				return n + n2, err
 			}
 		} else {
@@ -501,5 +536,5 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 		}
 	}
 
-	return s.conn.Write(b)
+	return writeFn(b)
 }
