@@ -70,9 +70,10 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 	}
 
-	var connID uint32
+	var conn *stats.Conn
 	if s.stats != nil {
-		connID = s.stats.NewConnID()
+		conn = s.stats.AcquireConn(id, c.RemoteAddr().String())
+		defer s.stats.ReleaseConn(conn)
 	}
 
 	sess := session.NewServerSession(c, func(stream *session.Stream) {
@@ -91,7 +92,7 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 
 		var st *stats.StreamStats
 		if s.stats != nil {
-			st = s.stats.TraceStream(id, connID, stream.ID())
+			st = s.stats.TraceStream(id, conn.ID(), conn.NextStreamID())
 			st.SetReqAddr(destination.String())
 			stream.Counter = st
 			defer s.stats.UntraceStream(st)

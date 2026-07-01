@@ -70,8 +70,9 @@ func TestRegistryConcurrentAccounting(t *testing.T) {
 	if tr.Rx != int64(2*goroutines*perGoroutine) {
 		t.Fatalf("rx = %d, want %d", tr.Rx, 2*goroutines*perGoroutine)
 	}
-	if r.Online()["alice"] != goroutines {
-		t.Fatalf("online = %d, want %d", r.Online()["alice"], goroutines)
+	// All sessions share source IP "x", so they count as one online device.
+	if got := r.Online()["alice"]; got != 1 {
+		t.Fatalf("online = %d, want 1 (pooled sessions from one source IP = one device)", got)
 	}
 
 	for _, s := range sessions {
@@ -133,12 +134,13 @@ func TestRegistryClear(t *testing.T) {
 
 func TestRegistryDumpStreams(t *testing.T) {
 	r := NewRegistry()
-	conn := r.NewConnID()
-	s1 := r.TraceStream("alice", conn, 1)
+	aliceConn := r.AcquireConn("alice", "1.1.1.1:1")
+	s1 := r.TraceStream("alice", aliceConn.ID(), aliceConn.NextStreamID())
 	s1.SetReqAddr("example.com:443")
 	s1.AddTx(7)
-	r.TraceStream("alice", conn, 2)
-	r.TraceStream("bob", r.NewConnID(), 1)
+	r.TraceStream("alice", aliceConn.ID(), aliceConn.NextStreamID())
+	bobConn := r.AcquireConn("bob", "2.2.2.2:2")
+	r.TraceStream("bob", bobConn.ID(), bobConn.NextStreamID())
 
 	rows := r.DumpStreams()
 	if len(rows) != 3 {

@@ -166,11 +166,12 @@ func TestHTTPTrafficClearRequiresAuth(t *testing.T) {
 
 func TestHTTPDumpStreams(t *testing.T) {
 	r := NewRegistry()
-	conn := r.NewConnID()
-	s := r.TraceStream("alice", conn, 1)
+	aliceConn := r.AcquireConn("alice", "1.1.1.1:1")
+	s := r.TraceStream("alice", aliceConn.ID(), aliceConn.NextStreamID())
 	s.SetReqAddr("example.com:443")
 	s.AddTx(10)
-	r.TraceStream("bob", r.NewConnID(), 1)
+	bobConn := r.AcquireConn("bob", "2.2.2.2:2")
+	r.TraceStream("bob", bobConn.ID(), bobConn.NextStreamID())
 	h := NewHandler(ServerOptions{Secret: "s3cr3t", Registry: r})
 
 	req := httptest.NewRequest(http.MethodGet, "/dump/streams", nil)
@@ -197,7 +198,8 @@ func TestHTTPDumpStreams(t *testing.T) {
 
 func TestHTTPDumpStreamsTextPlain(t *testing.T) {
 	r := NewRegistry()
-	s := r.TraceStream("alice", r.NewConnID(), 1)
+	aliceConn := r.AcquireConn("alice", "1.1.1.1:1")
+	s := r.TraceStream("alice", aliceConn.ID(), aliceConn.NextStreamID())
 	s.SetReqAddr("example.com:443")
 	h := NewHandler(ServerOptions{Secret: "s3cr3t", Registry: r})
 

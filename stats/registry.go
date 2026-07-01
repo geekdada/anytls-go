@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -50,7 +52,9 @@ type Registry struct {
 
 	streamMu sync.RWMutex
 	streams  map[*StreamStats]struct{}
-	connSeq  atomic.Uint32
+
+	deviceMu sync.Mutex
+	devices  map[deviceKey]*Conn
 }
 
 func NewRegistry() *Registry {
@@ -58,17 +62,103 @@ func NewRegistry() *Registry {
 		users:   make(map[string]*UserStat),
 		now:     time.Now,
 		streams: make(map[*StreamStats]struct{}),
+		devices: make(map[deviceKey]*Conn),
 	}
 }
 
-// NewConnID hands out a per-connection identifier for the /dump/streams
-// "connection" column. It is monotonic for the process lifetime.
-func (r *Registry) NewConnID() uint32 { return r.connSeq.Add(1) }
+// deviceKey identifies one logical client device on the server. anytls has no
+// device identity on the wire, so a device is inferred from its credential plus
+// source IP — a single device's pooled TLS connections share a source IP and
+// differ only in source port.
+type deviceKey struct {
+	auth string
+	ip   string
+}
+
+// Conn is the per-device logical connection handle, the direct analog of a
+// hysteria QUIC connection. Every pooled TLS session from the same device
+// shares one Conn, so its id is the stable "connection" value in
+// /dump/streams and streamSeq numbers the streams multiplexed under it
+// (monotonic within the connection, like hysteria's per-connection stream ids).
+type Conn struct {
+	key       deviceKey
+	id        uint32
+	streamSeq atomic.Uint32
+	refs      int // live sessions from this device; guarded by Registry.deviceMu
+}
+
+// ID is the device's connection identifier (the /dump/streams "connection").
+func (c *Conn) ID() uint32 { return c.id }
+
+// NextStreamID hands out the next monotonic stream number within this
+// connection, so streams from different pooled sessions never collide.
+func (c *Conn) NextStreamID() uint32 { return c.streamSeq.Add(1) }
+
+// AcquireConn returns the logical connection for the device behind (authID,
+// remoteAddr), creating it on first use and reference-counting it so concurrent
+// pooled sessions from the same device share one connection id. Pair every call
+// with ReleaseConn.
+func (r *Registry) AcquireConn(authID, remoteAddr string) *Conn {
+	key := deviceKey{auth: authID, ip: hostOnly(remoteAddr)}
+	r.deviceMu.Lock()
+	defer r.deviceMu.Unlock()
+	c, ok := r.devices[key]
+	if !ok {
+		c = &Conn{key: key, id: r.freshConnID()}
+		r.devices[key] = c
+	}
+	c.refs++
+	return c
+}
+
+// ReleaseConn drops one reference to a device's connection, freeing it once the
+// last session for that device disconnects. A later reconnect gets a fresh id,
+// matching hysteria where a new connection gets a new id.
+func (r *Registry) ReleaseConn(c *Conn) {
+	if c == nil {
+		return
+	}
+	r.deviceMu.Lock()
+	defer r.deviceMu.Unlock()
+	c.refs--
+	if c.refs <= 0 {
+		delete(r.devices, c.key)
+	}
+}
+
+// freshConnID returns a random id unused by any live device. Random (like
+// hysteria) avoids leaking the cumulative connection count; the caller holds
+// deviceMu so the uniqueness check is race-free.
+func (r *Registry) freshConnID() uint32 {
+	for {
+		id := rand.Uint32()
+		inUse := false
+		for _, c := range r.devices {
+			if c.id == id {
+				inUse = true
+				break
+			}
+		}
+		if !inUse {
+			return id
+		}
+	}
+}
+
+// hostOnly strips the port from an "ip:port" address, falling back to the whole
+// string if it has no port.
+func hostOnly(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
 
 // TraceStream begins tracking a single stream and returns its stats record,
 // which the caller installs on the stream so byte accounting flows in. authID
-// is the user id, connID groups streams sharing one session, streamID is the
-// per-session stream number. The record starts in the "connect" state.
+// is the user id, connID groups streams sharing one device connection (see
+// Conn), streamID is the stream number within that connection. The record
+// starts in the "connect" state.
 func (r *Registry) TraceStream(authID string, connID, streamID uint32) *StreamStats {
 	s := &StreamStats{
 		authID:      authID,
@@ -173,19 +263,24 @@ func (r *Registry) Clear() map[string]TrafficEntry {
 	return snap
 }
 
-// Online returns the number of active sessions for each id that has at least
-// one session connected right now. Ids with traffic history but no live
-// sessions are omitted (matching hysteria's /online semantics).
+// Online returns the number of online devices for each id that has at least one
+// session connected right now. Sessions are deduplicated by source IP so a
+// device's pool of TLS connections counts once — matching hysteria's /online,
+// where one device keeps one (QUIC) connection. Ids with traffic history but no
+// live sessions are omitted.
 func (r *Registry) Online() map[string]int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make(map[string]int)
 	for id, u := range r.users {
 		u.mu.Lock()
-		n := len(u.sessions)
+		ips := make(map[string]struct{}, len(u.sessions))
+		for _, info := range u.sessions {
+			ips[hostOnly(info.remote)] = struct{}{}
+		}
 		u.mu.Unlock()
-		if n > 0 {
-			out[id] = n
+		if len(ips) > 0 {
+			out[id] = len(ips)
 		}
 	}
 	return out

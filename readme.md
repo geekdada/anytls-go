@@ -104,10 +104,12 @@ trafficStats:
 | --- | --- | --- |
 | `/traffic` | GET | 返回各 `id` 的累计流量：`{"<id>": {"tx": N, "rx": N}}` |
 | `/traffic?clear=<真值>` | GET | 返回清零前快照，随后重置计数（`clear` 用 `strconv.ParseBool` 解析，`1`/`t`/`true` 等均可） |
-| `/online` | GET | 返回各 `id` 当前在线会话数：`{"<id>": N}` |
+| `/online` | GET | 返回各 `id` 当前在线设备数（按 `auth`+源IP 去重）：`{"<id>": N}` |
 | `/kick` | POST | 请求体为 `id` 数组 `["a","b"]`，断开这些 `id` 的所有会话，返回空 `200` |
 | `/dump/streams` | GET | 返回当前所有活动流；默认 JSON `{"streams":[...]}`，`Accept: text/plain` 时返回 netstat 风格表格 |
 
 `/dump/streams` 的每条记录字段与 hysteria 2 完全一致：`state`、`auth`、`connection`、`stream`、`req_addr`、`hooked_req_addr`、`tx`、`rx`、`initial_at`、`last_active_at`（时间为 RFC3339Nano）。其中 `hooked_req_addr` 恒为空——AnyTLS 没有请求改写（ACL）功能，这与 hysteria 在未命中改写规则时的输出相同。
+
+`connection` 对应 hysteria 的「承载该流的 QUIC 连接」：在 AnyTLS 里它是**设备级逻辑连接**——同一设备（按 `auth`+源IP 推断）的多条池化 TLS 会话共享同一个 `connection`，其下的多个流以单调递增的 `stream` 编号，正如 hysteria 一个设备保持一条连接、连接内多路复用多个流。设备的多条会话全部断开后该 `connection` 释放，重连得到新 id（无后台清理协程）。用 IP 推断设备有两点局限：① 同一 NAT 公网 IP 后、用**同一** `auth` 的多台设备会被并为一个 `connection`（用不同 `auth` 则可区分）；② 设备 IP 变化（如移动网络漫游）会得到新的 `connection` id。
 
 内存仅由 `/traffic?clear=...` 回收（无后台清理协程，与 hysteria 一致）：离线条目删除，仍有活动会话的条目就地清零。
