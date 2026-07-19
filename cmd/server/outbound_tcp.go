@@ -1,6 +1,7 @@
 package main
 
 import (
+	"anytls/acl"
 	"anytls/proxy"
 	"anytls/stats"
 	"context"
@@ -14,8 +15,19 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats) error {
-	c, err := proxy.SystemDialer.DialContext(ctx, "tcp", destination.String())
+func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, aclEngine *acl.Engine) error {
+	dialAddr := destination
+	if aclEngine != nil {
+		var ok bool
+		dialAddr, ok = aclTCPDialAddr(aclEngine, destination)
+		if !ok {
+			logrus.Debugln("proxyOutboundTCP ACL reject:", destination)
+			err := E.Errors(errACLRejected, N.ReportHandshakeFailure(conn, errACLRejected))
+			return err
+		}
+	}
+
+	c, err := proxy.SystemDialer.DialContext(ctx, "tcp", dialAddr.String())
 	if err != nil {
 		logrus.Debugln("proxyOutboundTCP DialContext:", err)
 		err = E.Errors(err, N.ReportHandshakeFailure(conn, err))
@@ -33,7 +45,7 @@ func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksadd
 	return bufio.CopyConn(ctx, conn, c)
 }
 
-func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats) error {
+func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, aclEngine *acl.Engine) error {
 	request, err := uot.ReadRequest(conn)
 	if err != nil {
 		logrus.Debugln("proxyOutboundUoT ReadRequest:", err)
@@ -55,5 +67,10 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksadd
 		st.SetState(stats.StreamStateEstablished)
 	}
 
-	return bufio.CopyPacketConn(ctx, uot.NewConn(conn, *request), bufio.NewPacketConn(c))
+	packetConn := N.PacketConn(bufio.NewPacketConn(c))
+	if aclEngine != nil {
+		packetConn = newACLPacketConn(packetConn, aclEngine)
+	}
+
+	return bufio.CopyPacketConn(ctx, uot.NewConn(conn, *request), packetConn)
 }

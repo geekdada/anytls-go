@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"anytls/acl"
 	"anytls/auth"
 	"anytls/config"
 	"anytls/limiter"
@@ -124,6 +126,32 @@ func main() {
 		registry = stats.NewRegistry()
 	}
 
+	var aclEngine *acl.Engine
+	if cfg.ACLEnabled() {
+		geoInterval, err := cfg.GeoUpdateInterval()
+		if err != nil {
+			logrus.Fatalln(err)
+		}
+		geoLoader := &acl.FileGeoLoader{
+			GeoIPFilename:   cfg.ACL.GeoIP,
+			GeoSiteFilename: cfg.ACL.GeoSite,
+			UpdateInterval:  geoInterval,
+		}
+		if cfg.ACL.File != "" {
+			aclEngine, err = acl.NewEngineFromFile(cfg.ACL.File, geoLoader)
+			if err != nil {
+				logrus.Fatalln("acl:", err)
+			}
+			logrus.Infoln("[ACL] loaded rules from file:", cfg.ACL.File)
+		} else {
+			aclEngine, err = acl.NewEngineFromString(strings.Join(cfg.ACL.Inline, "\n"), geoLoader)
+			if err != nil {
+				logrus.Fatalln("acl:", err)
+			}
+			logrus.Infoln("[ACL] loaded", len(cfg.ACL.Inline), "inline rules")
+		}
+	}
+
 	upBps, downBps, err := cfg.BandwidthLimits()
 	if err != nil {
 		logrus.Fatalln(err)
@@ -149,7 +177,7 @@ func main() {
 		}()
 	}
 
-	server := NewMyServer(tlsConfig, authn, registry, limits)
+	server := NewMyServer(tlsConfig, authn, registry, limits, aclEngine)
 
 	go func() {
 		<-ctx.Done()
