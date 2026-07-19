@@ -85,7 +85,7 @@ Shadowrocket 2.2.65+ 实现了 anytls 协议的客户端。
 
 ## 本分支相对上游的改动
 
-本分支在上游 `anytls-go` 的基础上，为**服务端**新增了三个子系统，与 [hysteria 2](https://github.com/apernet/hysteria) 的对应功能保持一致（请求/响应格式、接口路径与副作用均对齐）。客户端与线路协议未作改动，完全向后兼容。
+本分支在上游 `anytls-go` 的基础上，为**服务端**新增了四个子系统，与 [hysteria 2](https://github.com/apernet/hysteria) 的对应功能保持一致（请求/响应格式、接口路径与副作用均对齐）。客户端与线路协议未作改动，完全向后兼容。
 
 ### YAML 配置文件（`-c`）
 
@@ -110,6 +110,17 @@ auth:
     cacheTTL: 60s        # 缓存成功鉴权结果的时长，留空默认 10s，"0" 关闭缓存
     cacheSize: 4096      # 缓存条目上限，默认 4096
     negativeCacheTTL: 60s # 缓存拒绝结果的时长，留空默认 60s，"0" 关闭
+
+# ACL 规则（可选，file 与 inline 二选一，均留空则不启用）
+acl:
+  inline:
+    - reject(suffix:example.com)
+    - reject(all, udp/443)
+    - direct(all)
+  # file: /path/to/rules.acl      # 改为从文件加载规则
+  # geoip: /path/to/geoip.dat     # 可选，留空首次用到时自动下载
+  # geosite: /path/to/geosite.dat # 可选，留空首次用到时自动下载
+  # geoUpdateInterval: 168h       # 可选，数据文件更新周期，默认 7 天
 
 # 流量统计 HTTP API（可选，listen 留空则不启动）
 trafficStats:
@@ -148,11 +159,23 @@ bandwidth:
 | `/kick` | POST | 请求体为 `id` 数组 `["a","b"]`，断开这些 `id` 的所有会话，返回空 `200` |
 | `/dump/streams` | GET | 返回当前所有活动流；默认 JSON `{"streams":[...]}`，`Accept: text/plain` 时返回 netstat 风格表格 |
 
-`/dump/streams` 的每条记录字段与 hysteria 2 完全一致：`state`、`auth`、`connection`、`stream`、`req_addr`、`hooked_req_addr`、`tx`、`rx`、`initial_at`、`last_active_at`（时间为 RFC3339Nano）。其中 `hooked_req_addr` 恒为空——AnyTLS 没有请求改写（ACL）功能，这与 hysteria 在未命中改写规则时的输出相同。
+`/dump/streams` 的每条记录字段与 hysteria 2 完全一致：`state`、`auth`、`connection`、`stream`、`req_addr`、`hooked_req_addr`、`tx`、`rx`、`initial_at`、`last_active_at`（时间为 RFC3339Nano）。其中 `hooked_req_addr` 目前恒为空（ACL 劫持改写未回填到统计），这与 hysteria 在未命中改写规则时的输出相同。
 
 `connection` 对应 hysteria 的「承载该流的 QUIC 连接」：在 AnyTLS 里它是**设备级逻辑连接**——同一设备（按 `auth`+源IP 推断）的多条池化 TLS 会话共享同一个 `connection`，其下的多个流以单调递增的 `stream` 编号，正如 hysteria 一个设备保持一条连接、连接内多路复用多个流。设备的多条会话全部断开后该 `connection` 释放，重连得到新 id（无后台清理协程）。用 IP 推断设备有两点局限：① 同一 NAT 公网 IP 后、用**同一** `auth` 的多台设备会被并为一个 `connection`（用不同 `auth` 则可区分）；② 设备 IP 变化（如移动网络漫游）会得到新的 `connection` id。
 
 内存仅由 `/traffic?clear=...` 回收（无后台清理协程，与 hysteria 一致）：离线条目删除，仍有活动会话的条目就地清零。
+
+### ACL 规则
+
+配置 `acl` 后，服务端按 [hysteria 2 的 ACL](https://v2.hysteria.network/zh/docs/advanced/ACL/) 语法与匹配语义过滤客户端请求，但**不包含 outbounds 控制**：规则目标只有内置的 `direct`（直连）、`reject`（拒绝）、`default`（等同 `direct`），使用其他出站名会在启动时报错。
+
+- 规则自上而下匹配，首个命中生效；全部未命中默认 `direct`。支持 `#` 注释。
+- 地址类型与 hysteria 一致：单个 IP、CIDR、域名、`*.example.com` 通配、`suffix:` 域名后缀、`geoip:xx`、`geosite:xx`（支持 `@attr` 标签）、`all`。
+- `proto/port` 与劫持地址语义一致，如 `reject(all, udp/443)` 屏蔽 QUIC、`direct(8.8.8.8, udp/53, 1.1.1.1)` 劫持目标地址（仅 IP，不可为域名）。
+- 与 hysteria 相同，域名请求会先解析再匹配，IP 类规则对域名请求同样生效；TCP 直接拨解析出的 IP。
+- UDP（udp over tcp）按**每个报文**的目标地址检查：命中 `reject` 的报文静默丢弃、流保持存活；命中劫持规则的报文改写目标地址。决策按目标地址在流生命周期内缓存。
+- `geoip:`/`geosite:` 使用 v2ray 数据文件；未配置 `acl.geoip`/`acl.geosite` 路径时自动下载（Loyalsoldier v2ray-rules-dat），并按 `acl.geoUpdateInterval` 周期更新（默认 7 天）。
+- `file` 与 `inline` 互斥；规则编译失败会导致启动失败。
 
 ### 带宽限速
 
