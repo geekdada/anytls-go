@@ -292,6 +292,101 @@ func TestAuthNegativeCacheTTLInvalidFailsLoad(t *testing.T) {
 	}
 }
 
+func TestLoadFileACL(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("inline rules", func(t *testing.T) {
+		path := filepath.Join(dir, "acl-inline.yaml")
+		body := `password: hunter2
+acl:
+  inline:
+    - reject(geoip:cn)
+    - direct(all)
+  geoip: /data/geoip.dat
+  geosite: /data/geosite.dat
+  geoUpdateInterval: 24h
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.ACLEnabled() {
+			t.Fatal("expected ACLEnabled")
+		}
+		if len(c.ACL.Inline) != 2 {
+			t.Fatalf("inline rules wrong: %#v", c.ACL)
+		}
+		iv, err := c.GeoUpdateInterval()
+		if err != nil || iv != 24*time.Hour {
+			t.Fatalf("geoUpdateInterval = (%v, %v), want 24h", iv, err)
+		}
+	})
+
+	t.Run("file rules", func(t *testing.T) {
+		path := filepath.Join(dir, "acl-file.yaml")
+		body := `password: hunter2
+acl:
+  file: /etc/anytls/rules.acl
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.ACLEnabled() || c.ACL.File != "/etc/anytls/rules.acl" {
+			t.Fatalf("acl.file wrong: %#v", c.ACL)
+		}
+		iv, err := c.GeoUpdateInterval()
+		if err != nil || iv != 0 {
+			t.Fatalf("empty geoUpdateInterval should be 0, got (%v, %v)", iv, err)
+		}
+	})
+
+	t.Run("file and inline conflict", func(t *testing.T) {
+		path := filepath.Join(dir, "acl-both.yaml")
+		body := `password: hunter2
+acl:
+  file: /etc/anytls/rules.acl
+  inline:
+    - direct(all)
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Fatal("expected load to fail when both acl.file and acl.inline are set")
+		}
+	})
+
+	t.Run("bad geoUpdateInterval", func(t *testing.T) {
+		path := filepath.Join(dir, "acl-bad-geo.yaml")
+		body := `password: hunter2
+acl:
+  inline:
+    - direct(all)
+  geoUpdateInterval: nonsense
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Fatal("expected load to fail on bad geoUpdateInterval")
+		}
+	})
+
+	t.Run("acl disabled by default", func(t *testing.T) {
+		c := Default()
+		if c.ACLEnabled() {
+			t.Fatal("default config should not enable ACL")
+		}
+	})
+}
+
 func TestLoadFileTLS(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.yaml")

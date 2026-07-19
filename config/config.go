@@ -22,8 +22,20 @@ type Config struct {
 	PaddingScheme string             `yaml:"padding-scheme"`
 	TLS           TLSConfig          `yaml:"tls"`
 	Auth          AuthConfig         `yaml:"auth"`
+	ACL           ACLConfig          `yaml:"acl"`
 	TrafficStats  TrafficStatsConfig `yaml:"trafficStats"`
 	Bandwidth     BandwidthConfig    `yaml:"bandwidth"`
+}
+
+// ACLConfig mirrors hysteria 2's acl block. Exactly one of File or Inline may
+// be set. GeoIP/GeoSite are optional paths to v2ray .dat files; when empty the
+// files are downloaded automatically (subject to GeoUpdateInterval).
+type ACLConfig struct {
+	File              string   `yaml:"file"`
+	Inline            []string `yaml:"inline"`
+	GeoIP             string   `yaml:"geoip"`
+	GeoSite           string   `yaml:"geosite"`
+	GeoUpdateInterval string   `yaml:"geoUpdateInterval"`
 }
 
 // BandwidthConfig caps the per-device transfer rate, matching hysteria 2's
@@ -94,6 +106,12 @@ func LoadFile(path string) (*Config, error) {
 	if _, _, err := c.BandwidthLimits(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
+	if _, err := c.GeoUpdateInterval(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
+	if err := c.ValidateACL(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
 	if err := c.ValidateTLS(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
@@ -153,6 +171,37 @@ func (c *Config) UseHTTPAuth() bool {
 // StatsEnabled reports whether the traffic-stats HTTP API should be started.
 func (c *Config) StatsEnabled() bool {
 	return c.TrafficStats.Listen != ""
+}
+
+// ACLEnabled reports whether ACL rules are configured. File and Inline are
+// mutually exclusive.
+func (c *Config) ACLEnabled() bool {
+	return c.ACL.File != "" || len(c.ACL.Inline) > 0
+}
+
+// ValidateACL ensures acl.file and acl.inline are not both set.
+func (c *Config) ValidateACL() error {
+	if c.ACL.File != "" && len(c.ACL.Inline) > 0 {
+		return fmt.Errorf("cannot set both acl.file and acl.inline")
+	}
+	return nil
+}
+
+// GeoUpdateInterval parses acl.geoUpdateInterval. Empty means the loader
+// default (7 days).
+func (c *Config) GeoUpdateInterval() (time.Duration, error) {
+	s := c.ACL.GeoUpdateInterval
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid acl.geoUpdateInterval %q: %w", s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("acl.geoUpdateInterval %q must not be negative", s)
+	}
+	return d, nil
 }
 
 // TLSEnabled reports whether TLS certificate files are configured.
