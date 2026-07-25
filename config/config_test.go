@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -514,5 +515,166 @@ bandwidth:
 	}
 	if _, err := LoadFile(path); err == nil {
 		t.Fatal("expected load to fail on bad bandwidth.up")
+	}
+}
+
+// TestLoadFileResolver loads the resolver block exactly as documented, with
+// every sub-block populated, and checks the selected one is read.
+func TestLoadFileResolver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolver.yaml")
+	body := `password: hunter2
+resolver:
+  type: udp
+  tcp:
+    addr: 8.8.8.8:53
+    timeout: 4s
+  udp:
+    addr: 8.8.4.4:53
+    timeout: 4s
+  tls:
+    addr: 1.1.1.1:853
+    timeout: 10s
+    sni: cloudflare-dns.com
+    insecure: false
+  https:
+    addr: 1.1.1.1:443
+    timeout: 10s
+    sni: cloudflare-dns.com
+    insecure: false
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ResolverEnabled() {
+		t.Fatal("expected ResolverEnabled")
+	}
+	if got := c.Resolver.Kind(); got != "udp" {
+		t.Errorf("Kind() = %q, want udp", got)
+	}
+	if got := c.Resolver.Addr(); got != "8.8.4.4:53" {
+		t.Errorf("Addr() = %q, want 8.8.4.4:53", got)
+	}
+	if c.Resolver.UDP.Timeout != 4*time.Second {
+		t.Errorf("udp.timeout = %v, want 4s", c.Resolver.UDP.Timeout)
+	}
+	if c.Resolver.TCP.Addr != "8.8.8.8:53" || c.Resolver.TCP.Timeout != 4*time.Second {
+		t.Errorf("tcp block wrong: %#v", c.Resolver.TCP)
+	}
+	if c.Resolver.TLS.Addr != "1.1.1.1:853" || c.Resolver.TLS.Timeout != 10*time.Second {
+		t.Errorf("tls block wrong: %#v", c.Resolver.TLS)
+	}
+	if c.Resolver.TLS.SNI != "cloudflare-dns.com" || c.Resolver.TLS.Insecure {
+		t.Errorf("tls sni/insecure wrong: %#v", c.Resolver.TLS)
+	}
+	if c.Resolver.HTTPS.Addr != "1.1.1.1:443" || c.Resolver.HTTPS.SNI != "cloudflare-dns.com" {
+		t.Errorf("https block wrong: %#v", c.Resolver.HTTPS)
+	}
+}
+
+func TestLoadFileResolverAddrPerType(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name     string
+		body     string
+		wantKind string
+		wantAddr string
+	}{
+		{name: "udp", body: "resolver:\n  type: udp\n  udp:\n    addr: 8.8.4.4:53\n", wantKind: "udp", wantAddr: "8.8.4.4:53"},
+		{name: "tcp", body: "resolver:\n  type: tcp\n  tcp:\n    addr: 8.8.8.8\n", wantKind: "tcp", wantAddr: "8.8.8.8"},
+		{name: "tls", body: "resolver:\n  type: tls\n  tls:\n    addr: 1.1.1.1:853\n", wantKind: "tls", wantAddr: "1.1.1.1:853"},
+		{name: "tcp-tls alias", body: "resolver:\n  type: tcp-tls\n  tls:\n    addr: 1.1.1.1\n", wantKind: "tcp-tls", wantAddr: "1.1.1.1"},
+		{name: "https", body: "resolver:\n  type: https\n  https:\n    addr: 1.1.1.1:443\n", wantKind: "https", wantAddr: "1.1.1.1:443"},
+		{name: "http alias", body: "resolver:\n  type: http\n  https:\n    addr: https://dns.google/dns-query\n", wantKind: "http", wantAddr: "https://dns.google/dns-query"},
+		{name: "uppercase", body: "resolver:\n  type: UDP\n  udp:\n    addr: 8.8.4.4\n", wantKind: "udp", wantAddr: "8.8.4.4"},
+		{name: "padded", body: "resolver:\n  type: \" tls \"\n  tls:\n    addr: 1.1.1.1\n", wantKind: "tls", wantAddr: "1.1.1.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".yaml")
+			if err := os.WriteFile(path, []byte("password: hunter2\n"+tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := LoadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.Resolver.Kind(); got != tt.wantKind {
+				t.Errorf("Kind() = %q, want %q", got, tt.wantKind)
+			}
+			if got := c.Resolver.Addr(); got != tt.wantAddr {
+				t.Errorf("Addr() = %q, want %q", got, tt.wantAddr)
+			}
+			if !c.ResolverEnabled() {
+				t.Error("expected ResolverEnabled")
+			}
+		})
+	}
+}
+
+func TestLoadFileResolverSystemDisabled(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "absent", body: ""},
+		{name: "empty type", body: "resolver:\n  type: \"\"\n"},
+		{name: "system", body: "resolver:\n  type: system\n"},
+		{name: "system uppercase", body: "resolver:\n  type: System\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".yaml")
+			if err := os.WriteFile(path, []byte("password: hunter2\n"+tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := LoadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.ResolverEnabled() {
+				t.Error("expected the system resolver to leave ResolverEnabled false")
+			}
+			if got := c.Resolver.Addr(); got != "" {
+				t.Errorf("Addr() = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestLoadFileResolverValidation(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "unknown type", body: "resolver:\n  type: doh\n", wantErr: `invalid resolver.type "doh"`},
+		{name: "udp without addr", body: "resolver:\n  type: udp\n", wantErr: "resolver.udp.addr"},
+		{name: "tcp without addr", body: "resolver:\n  type: tcp\n", wantErr: "resolver.tcp.addr"},
+		{name: "tls without addr", body: "resolver:\n  type: tls\n", wantErr: "resolver.tls.addr"},
+		{name: "https without addr", body: "resolver:\n  type: https\n", wantErr: "resolver.https.addr"},
+		{name: "wrong block filled", body: "resolver:\n  type: tls\n  udp:\n    addr: 8.8.4.4:53\n", wantErr: "resolver.tls.addr"},
+		{name: "negative timeout", body: "resolver:\n  type: udp\n  udp:\n    addr: 8.8.4.4:53\n    timeout: -4s\n", wantErr: "resolver.udp.timeout"},
+		{name: "malformed timeout", body: "resolver:\n  type: udp\n  udp:\n    addr: 8.8.4.4:53\n    timeout: 4x\n", wantErr: "parse config"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".yaml")
+			if err := os.WriteFile(path, []byte("password: hunter2\n"+tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadFile(path)
+			if err == nil {
+				t.Fatalf("expected load to fail for %s", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
 	}
 }

@@ -23,8 +23,39 @@ type Config struct {
 	TLS           TLSConfig          `yaml:"tls"`
 	Auth          AuthConfig         `yaml:"auth"`
 	ACL           ACLConfig          `yaml:"acl"`
+	Resolver      ResolverConfig     `yaml:"resolver"`
 	TrafficStats  TrafficStatsConfig `yaml:"trafficStats"`
 	Bandwidth     BandwidthConfig    `yaml:"bandwidth"`
+}
+
+// ResolverConfig mirrors hysteria 2's resolver block: it selects the DNS server
+// the node uses to resolve outbound destinations. Only the sub-block matching
+// Type is read. An empty or "system" Type keeps resolution on the system
+// resolver, which is only consulted when the ACL needs the destination IPs.
+type ResolverConfig struct {
+	Type  string             `yaml:"type"`
+	TCP   ResolverAddrConfig `yaml:"tcp"`
+	UDP   ResolverAddrConfig `yaml:"udp"`
+	TLS   ResolverTLSConfig  `yaml:"tls"`
+	HTTPS ResolverTLSConfig  `yaml:"https"`
+}
+
+// ResolverAddrConfig configures the plain UDP and TCP resolvers. A missing port
+// in Addr defaults to 53; a zero Timeout defaults to 2s.
+type ResolverAddrConfig struct {
+	Addr    string        `yaml:"addr"`
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// ResolverTLSConfig configures the DNS-over-TLS and DNS-over-HTTPS resolvers. A
+// missing port in Addr defaults to 853 for TLS; for HTTPS, Addr may also be a
+// full URL. SNI overrides the TLS server name, which matters when Addr is an IP
+// literal. Insecure skips certificate verification.
+type ResolverTLSConfig struct {
+	Addr     string        `yaml:"addr"`
+	Timeout  time.Duration `yaml:"timeout"`
+	SNI      string        `yaml:"sni"`
+	Insecure bool          `yaml:"insecure"`
 }
 
 // ACLConfig mirrors hysteria 2's acl block. Exactly one of File or Inline may
@@ -116,6 +147,9 @@ func LoadFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	if err := c.ValidateAuth(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
+	if err := c.ValidateResolver(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	return c, nil
@@ -222,6 +256,79 @@ func (c *Config) ValidateAuth() error {
 	default:
 		return fmt.Errorf("invalid auth.type %q", c.Auth.Type)
 	}
+}
+
+// Kind returns the normalized resolver.type. Hysteria matches it
+// case-insensitively and accepts the aliases "tcp-tls" and "http", so do the
+// same; "" and "system" both mean the system resolver.
+func (r *ResolverConfig) Kind() string {
+	return strings.ToLower(strings.TrimSpace(r.Type))
+}
+
+// Enabled reports whether a custom resolver is configured. The system case is
+// not a resolver instance: it stays on net.DefaultResolver.
+func (r *ResolverConfig) Enabled() bool {
+	switch r.Kind() {
+	case "", "system":
+		return false
+	default:
+		return true
+	}
+}
+
+// Addr returns the server address of the selected sub-block, "" for the system
+// case.
+func (r *ResolverConfig) Addr() string {
+	switch r.Kind() {
+	case "udp":
+		return r.UDP.Addr
+	case "tcp":
+		return r.TCP.Addr
+	case "tls", "tcp-tls":
+		return r.TLS.Addr
+	case "https", "http":
+		return r.HTTPS.Addr
+	default:
+		return ""
+	}
+}
+
+// Validate ensures resolver.type is known and the sub-block it selects is
+// usable. Error messages carry hysteria's field names.
+func (r *ResolverConfig) Validate() error {
+	var field string
+	var timeout time.Duration
+	switch r.Kind() {
+	case "", "system":
+		return nil
+	case "udp":
+		field, timeout = "resolver.udp", r.UDP.Timeout
+	case "tcp":
+		field, timeout = "resolver.tcp", r.TCP.Timeout
+	case "tls", "tcp-tls":
+		field, timeout = "resolver.tls", r.TLS.Timeout
+	case "https", "http":
+		field, timeout = "resolver.https", r.HTTPS.Timeout
+	default:
+		return fmt.Errorf("invalid resolver.type %q", r.Type)
+	}
+	if r.Addr() == "" {
+		return fmt.Errorf("%s.addr: empty resolver address", field)
+	}
+	if timeout < 0 {
+		return fmt.Errorf("%s.timeout %v must not be negative", field, timeout)
+	}
+	return nil
+}
+
+// ResolverEnabled reports whether a custom resolver is configured.
+func (c *Config) ResolverEnabled() bool {
+	return c.Resolver.Enabled()
+}
+
+// ValidateResolver validates the resolver block.
+func (c *Config) ValidateResolver() error {
+	return c.Resolver.Validate()
 }
 
 // ValidateTLS ensures cert and key are both set or both omitted.
