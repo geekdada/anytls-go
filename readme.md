@@ -85,7 +85,7 @@ Shadowrocket 2.2.65+ 实现了 anytls 协议的客户端。
 
 ## 本分支相对上游的改动
 
-本分支在上游 `anytls-go` 的基础上，为**服务端**新增了四个子系统，与 [hysteria 2](https://github.com/apernet/hysteria) 的对应功能保持一致（请求/响应格式、接口路径与副作用均对齐）。客户端与线路协议未作改动，完全向后兼容。
+本分支在上游 `anytls-go` 的基础上，为**服务端**新增了五个子系统，与 [hysteria 2](https://github.com/apernet/hysteria) 的对应功能保持一致（请求/响应格式、接口路径与副作用均对齐）。客户端与线路协议未作改动，完全向后兼容。
 
 ### YAML 配置文件（`-c`）
 
@@ -121,6 +121,26 @@ acl:
   # geoip: /path/to/geoip.dat     # 可选，留空首次用到时自动下载
   # geosite: /path/to/geosite.dat # 可选，留空首次用到时自动下载
   # geoUpdateInterval: 168h       # 可选，数据文件更新周期，默认 7 天
+
+# 自定义 DNS 解析器（可选，留空或 system 表示使用系统解析器）
+resolver:
+  type: udp            # udp | tcp | tls | https
+  udp:
+    addr: 8.8.4.4:53   # 可省略端口，默认 53
+    timeout: 4s        # 留空默认 2s
+  # tcp:
+  #   addr: 8.8.8.8:53      # 可省略端口，默认 53
+  #   timeout: 4s
+  # tls:                    # DNS over TLS
+  #   addr: 1.1.1.1:853     # 可省略端口，默认 853
+  #   timeout: 10s
+  #   sni: cloudflare-dns.com
+  #   insecure: false       # 是否跳过 DNS 服务器证书校验
+  # https:                  # DNS over HTTPS
+  #   addr: 1.1.1.1:443     # 也可直接写完整 URL，否则拼为 https://<addr>/dns-query
+  #   timeout: 10s
+  #   sni: cloudflare-dns.com
+  #   insecure: false
 
 # 流量统计 HTTP API（可选，listen 留空则不启动）
 trafficStats:
@@ -172,10 +192,26 @@ bandwidth:
 - 规则自上而下匹配，首个命中生效；全部未命中默认 `direct`。支持 `#` 注释。
 - 地址类型与 hysteria 一致：单个 IP、CIDR、域名、`*.example.com` 通配、`suffix:` 域名后缀、`geoip:xx`、`geosite:xx`（支持 `@attr` 标签）、`all`。
 - `proto/port` 与劫持地址语义一致，如 `reject(all, udp/443)` 屏蔽 QUIC、`direct(8.8.8.8, udp/53, 1.1.1.1)` 劫持目标地址（仅 IP，不可为域名）。
-- 与 hysteria 相同，域名请求会先解析再匹配，IP 类规则对域名请求同样生效；TCP 直接拨解析出的 IP。
+- 与 hysteria 相同，域名请求会先解析再匹配，IP 类规则对域名请求同样生效；TCP 直接拨解析出的 IP。解析所用的 DNS 服务器可通过 [`resolver`](#自定义-dns-解析器) 指定，留空则用系统解析器。
 - UDP（udp over tcp）按**每个报文**的目标地址检查：命中 `reject` 的报文静默丢弃、流保持存活；命中劫持规则的报文改写目标地址。决策按目标地址在流生命周期内缓存。
 - `geoip:`/`geosite:` 使用 v2ray 数据文件；未配置 `acl.geoip`/`acl.geosite` 路径时自动下载（Loyalsoldier v2ray-rules-dat），并按 `acl.geoUpdateInterval` 周期更新（默认 7 天）。
 - `file` 与 `inline` 互斥；规则编译失败会导致启动失败。
+
+### 自定义 DNS 解析器
+
+配置 `resolver` 后，服务端用指定的 DNS 服务器解析出站目标域名，语义与 [hysteria 2 的 resolver](https://v2.hysteria.network/zh/docs/advanced/Full-Server-Config/#resolver) 一致：
+
+- `type` 取值：`udp`、`tcp`、`tls`（DNS over TLS，别名 `tcp-tls`）、`https`（DNS over HTTPS，别名 `http`）；不区分大小写。留空或 `system` 表示系统解析器。其他取值启动时报错。
+- 只读取 `type` 对应的子块。`addr` 必填，缺省端口为 `53`（udp/tcp）或 `853`（tls）；`https` 的 `addr` 非 `https://` 开头时拼为 `https://<addr>/dns-query`。
+- `timeout` 留空默认 `2s`，且该超时是**单次 DNS 交换**的超时；含重试与 CNAME 跟随时总耗时可能超过它。
+- `sni` 覆盖 TLS 的 server name（`addr` 为 IP 时通常必需），`insecure: true` 跳过 DNS 服务器证书校验。
+- A 与 AAAA **并行**查询，各重试 2 次，只取第一条 A 和第一条 AAAA；DoH 不重试（与 hysteria 一致）。同一报文内的 CNAME 链会被折叠，跟随深度上限 16 并检测环路。
+- 配置了自定义解析器后，**无论是否启用 ACL**，服务端都用它解析域名并直连解析结果。解析不出任何地址时 TCP 请求失败（错误形如 `resolve error: ...`），**不回退系统解析器**，避免 DNS 泄漏；UDP（udp over tcp）报文静默丢弃、流保持存活（与 ACL 拒绝的报文同样处理，因为一条流复用多个目标）。
+- 解析失败仍会先过 ACL：域名类 `reject` 规则照常生效，劫持规则也能救回解析不出的域名（与 hysteria 的 `Resolver(ACL(outbound))` 顺序一致）。
+- 目标本身是 IP 时不发起任何查询。
+- 未配置（或 `system`）时行为与之前完全一致：启用 ACL 时用系统解析器预解析以便 IP 规则命中域名请求；未启用 ACL 时不预解析，由拨号器自行解析。
+- 无 DNS 缓存（与 hysteria 一致）；UDP 路径按目标地址在流生命周期内缓存决策。双栈时优先 IPv4，不做 Happy Eyeballs 竞速。
+- 该配置仅作用于服务端出站解析；客户端与 `acl.geoip`/`acl.geosite` 数据文件下载仍走系统解析器（与 hysteria 相同）。
 
 ### 带宽限速
 
