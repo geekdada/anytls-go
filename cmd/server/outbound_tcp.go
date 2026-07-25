@@ -15,15 +15,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, aclEngine *acl.Engine) error {
+func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, policy *outboundPolicy) error {
 	dialAddr := destination
-	if aclEngine != nil {
-		var ok bool
-		dialAddr, ok = aclTCPDialAddr(aclEngine, destination)
-		if !ok {
-			logrus.Debugln("proxyOutboundTCP ACL reject:", destination)
-			err := E.Errors(errACLRejected, N.ReportHandshakeFailure(conn, errACLRejected))
-			return err
+	if policy.active() {
+		var err error
+		dialAddr, err = policy.dialAddr(ctx, destination, acl.ProtocolTCP)
+		if err != nil {
+			logrus.Debugln("proxyOutboundTCP:", destination, err)
+			return E.Errors(err, N.ReportHandshakeFailure(conn, err))
 		}
 	}
 
@@ -45,7 +44,7 @@ func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksadd
 	return bufio.CopyConn(ctx, conn, c)
 }
 
-func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, aclEngine *acl.Engine) error {
+func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, policy *outboundPolicy) error {
 	request, err := uot.ReadRequest(conn)
 	if err != nil {
 		logrus.Debugln("proxyOutboundUoT ReadRequest:", err)
@@ -68,8 +67,8 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksadd
 	}
 
 	packetConn := N.PacketConn(bufio.NewPacketConn(c))
-	if aclEngine != nil {
-		packetConn = newACLPacketConn(packetConn, aclEngine)
+	if policy.active() {
+		packetConn = newPolicyPacketConn(ctx, packetConn, policy)
 	}
 
 	return bufio.CopyPacketConn(ctx, uot.NewConn(conn, *request), packetConn)

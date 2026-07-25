@@ -18,6 +18,7 @@ import (
 	"anytls/config"
 	"anytls/limiter"
 	"anytls/proxy/padding"
+	"anytls/resolver"
 	"anytls/stats"
 	"anytls/util"
 
@@ -126,6 +127,15 @@ func main() {
 		registry = stats.NewRegistry()
 	}
 
+	var dnsResolver resolver.Resolver
+	if cfg.ResolverEnabled() {
+		dnsResolver, err = newResolver(&cfg.Resolver)
+		if err != nil {
+			logrus.Fatalln("resolver:", err)
+		}
+		logrus.Infoln("[Resolver] using", cfg.Resolver.Kind(), "resolver", cfg.Resolver.Addr())
+	}
+
 	var aclEngine *acl.Engine
 	if cfg.ACLEnabled() {
 		geoInterval, err := cfg.GeoUpdateInterval()
@@ -177,7 +187,7 @@ func main() {
 		}()
 	}
 
-	server := NewMyServer(tlsConfig, authn, registry, limits, aclEngine)
+	server := NewMyServer(tlsConfig, authn, registry, limits, aclEngine, dnsResolver)
 
 	go func() {
 		<-ctx.Done()

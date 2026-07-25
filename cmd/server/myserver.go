@@ -6,6 +6,7 @@ import (
 	"anytls/acl"
 	"anytls/auth"
 	"anytls/limiter"
+	"anytls/resolver"
 	"anytls/stats"
 )
 
@@ -14,15 +15,15 @@ type myServer struct {
 	auth      auth.Authenticator
 	stats     *stats.Registry
 	limits    *limiter.Registry
-	acl       *acl.Engine
+	policy    *outboundPolicy
 }
 
-func NewMyServer(tlsConfig *tls.Config, a auth.Authenticator, reg *stats.Registry, lim *limiter.Registry, aclEngine *acl.Engine) *myServer {
+func NewMyServer(tlsConfig *tls.Config, a auth.Authenticator, reg *stats.Registry, lim *limiter.Registry, aclEngine *acl.Engine, res resolver.Resolver) *myServer {
 	return &myServer{
 		tlsConfig: tlsConfig,
 		auth:      a,
 		stats:     reg,
 		limits:    lim,
-		acl:       aclEngine,
+		policy:    newOutboundPolicy(aclEngine, res),
 	}
 }
