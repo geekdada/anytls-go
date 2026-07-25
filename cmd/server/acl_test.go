@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"anytls/acl"
+	"anytls/resolver"
 
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 func testEngine(t *testing.T, rules string) *acl.Engine {
@@ -20,45 +25,181 @@ func testEngine(t *testing.T, rules string) *acl.Engine {
 	return e
 }
 
-func TestACLTCPDialAddrReject(t *testing.T) {
-	e := testEngine(t, "reject(10.0.0.0/8)\ndirect(all)\n")
-	_, ok := aclTCPDialAddr(e, M.ParseSocksaddr("10.1.2.3:443"))
-	if ok {
-		t.Fatal("expected reject for 10.1.2.3")
+// stubResolver records the hosts it was asked about and answers with a fixed
+// result.
+type stubResolver struct {
+	mu     sync.Mutex
+	calls  []string
+	result resolver.Result
+}
+
+func (s *stubResolver) Resolve(_ context.Context, host string) resolver.Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, host)
+	return s.result
+}
+
+func (s *stubResolver) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+
+// tcpDialAddr is the TCP-path shorthand used throughout these tests.
+func tcpDialAddr(t *testing.T, p *outboundPolicy, addr string) (M.Socksaddr, error) {
+	t.Helper()
+	return p.dialAddr(context.Background(), M.ParseSocksaddr(addr), acl.ProtocolTCP)
+}
+
+func TestPolicyDialAddrReject(t *testing.T) {
+	p := newOutboundPolicy(testEngine(t, "reject(10.0.0.0/8)\ndirect(all)\n"), nil)
+	if _, err := tcpDialAddr(t, p, "10.1.2.3:443"); !errors.Is(err, errACLRejected) {
+		t.Fatalf("expected reject for 10.1.2.3, got err = %v", err)
 	}
-	_, ok = aclTCPDialAddr(e, M.ParseSocksaddr("11.1.2.3:443"))
-	if !ok {
-		t.Fatal("expected direct for 11.1.2.3")
+	if _, err := tcpDialAddr(t, p, "11.1.2.3:443"); err != nil {
+		t.Fatalf("expected direct for 11.1.2.3, got err = %v", err)
 	}
 }
 
-func TestACLTCPDialAddrHijack(t *testing.T) {
-	e := testEngine(t, "direct(8.8.8.8,*,1.1.1.1)\ndirect(all)\n")
-	addr, ok := aclTCPDialAddr(e, M.ParseSocksaddr("8.8.8.8:53"))
-	if !ok {
-		t.Fatal("expected direct")
+func TestPolicyDialAddrHijack(t *testing.T) {
+	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8,*,1.1.1.1)\ndirect(all)\n"), nil)
+	addr, err := tcpDialAddr(t, p, "8.8.8.8:53")
+	if err != nil {
+		t.Fatalf("expected direct, got err = %v", err)
 	}
 	if addr.String() != "1.1.1.1:53" {
 		t.Fatalf("dial addr = %s, want 1.1.1.1:53", addr)
 	}
 }
 
-func TestACLTCPDialAddrResolvesFqdn(t *testing.T) {
-	e := testEngine(t, "reject(127.0.0.1)\ndirect(all)\n")
+func TestPolicyDialAddrResolvesFqdn(t *testing.T) {
+	p := newOutboundPolicy(testEngine(t, "reject(127.0.0.1)\ndirect(all)\n"), nil)
 	// localhost resolves locally to 127.0.0.1, so the IP rule must apply to
-	// the domain request.
-	_, ok := aclTCPDialAddr(e, M.ParseSocksaddr("localhost:443"))
-	if ok {
-		t.Fatal("expected localhost to match the 127.0.0.1 reject rule")
+	// the domain request. This covers the system-resolver path.
+	if _, err := tcpDialAddr(t, p, "localhost:443"); !errors.Is(err, errACLRejected) {
+		t.Fatalf("expected localhost to match the 127.0.0.1 reject rule, got err = %v", err)
 	}
 }
 
-func TestACLTCPDialAddrNoRuleMatchKeepsDestination(t *testing.T) {
-	e := testEngine(t, "reject(1.2.3.4)\n")
+func TestPolicyDialAddrNoRuleMatchKeepsDestination(t *testing.T) {
+	p := newOutboundPolicy(testEngine(t, "reject(1.2.3.4)\n"), nil)
 	dst := M.ParseSocksaddr("9.9.9.9:443")
-	addr, ok := aclTCPDialAddr(e, dst)
-	if !ok || addr != dst {
-		t.Fatalf("expected (%v, true), got (%v, %v)", dst, addr, ok)
+	addr, err := tcpDialAddr(t, p, "9.9.9.9:443")
+	if err != nil || addr != dst {
+		t.Fatalf("expected (%v, nil), got (%v, %v)", dst, addr, err)
+	}
+}
+
+func TestPolicyDialAddrResolverWithoutACL(t *testing.T) {
+	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
+	p := newOutboundPolicy(nil, res)
+	addr, err := tcpDialAddr(t, p, "example.com:443")
+	if err != nil {
+		t.Fatalf("unexpected err = %v", err)
+	}
+	if addr.String() != "1.2.3.4:443" {
+		t.Fatalf("dial addr = %s, want 1.2.3.4:443", addr)
+	}
+	if res.callCount() != 1 {
+		t.Fatalf("resolver calls = %d, want 1", res.callCount())
+	}
+}
+
+func TestPolicyDialAddrResolverPrefersIPv4(t *testing.T) {
+	res := &stubResolver{result: resolver.Result{
+		IPv4: net.IPv4(1, 2, 3, 4).To4(),
+		IPv6: net.ParseIP("2001:db8::1"),
+	}}
+	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res), "example.com:443")
+	if err != nil {
+		t.Fatalf("unexpected err = %v", err)
+	}
+	if addr.String() != "1.2.3.4:443" {
+		t.Fatalf("dial addr = %s, want 1.2.3.4:443", addr)
+	}
+}
+
+func TestPolicyDialAddrResolverIPv6Only(t *testing.T) {
+	res := &stubResolver{result: resolver.Result{IPv6: net.ParseIP("2001:db8::1")}}
+	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res), "example.com:443")
+	if err != nil {
+		t.Fatalf("unexpected err = %v", err)
+	}
+	if addr.String() != "[2001:db8::1]:443" {
+		t.Fatalf("dial addr = %s, want [2001:db8::1]:443", addr)
+	}
+}
+
+func TestPolicyDialAddrResolverFailureFailsRequest(t *testing.T) {
+	inner := errors.New("boom")
+	res := &stubResolver{result: resolver.Result{Err: inner}}
+	_, err := tcpDialAddr(t, newOutboundPolicy(nil, res), "example.com:443")
+	var resolveErr resolver.Error
+	if !errors.As(err, &resolveErr) {
+		t.Fatalf("err = %v, want resolver.Error", err)
+	}
+	if !errors.Is(err, inner) {
+		t.Fatalf("err = %v, want it to wrap %v", err, inner)
+	}
+}
+
+func TestPolicyDialAddrResolverFailureACLRejectWins(t *testing.T) {
+	// The ACL runs even when resolution failed, so a name rule still fires.
+	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
+	p := newOutboundPolicy(testEngine(t, "reject(suffix:example.com)\ndirect(all)\n"), res)
+	if _, err := tcpDialAddr(t, p, "blocked.example.com:443"); !errors.Is(err, errACLRejected) {
+		t.Fatalf("err = %v, want errACLRejected", err)
+	}
+}
+
+func TestPolicyDialAddrResolverFailureACLHijackWins(t *testing.T) {
+	// A hijack rule rescues a domain the resolver could not resolve, matching
+	// hysteria, where the hijack replaces the resolve result.
+	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
+	p := newOutboundPolicy(testEngine(t, "direct(example.com,*,1.1.1.1)\ndirect(all)\n"), res)
+	addr, err := tcpDialAddr(t, p, "example.com:443")
+	if err != nil {
+		t.Fatalf("unexpected err = %v", err)
+	}
+	if addr.String() != "1.1.1.1:443" {
+		t.Fatalf("dial addr = %s, want 1.1.1.1:443", addr)
+	}
+}
+
+func TestPolicyDialAddrACLMatchesResolvedIP(t *testing.T) {
+	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(127, 0, 0, 1).To4()}}
+	p := newOutboundPolicy(testEngine(t, "reject(127.0.0.1)\ndirect(all)\n"), res)
+	if _, err := tcpDialAddr(t, p, "blocked.example:443"); !errors.Is(err, errACLRejected) {
+		t.Fatalf("err = %v, want the resolved IP to hit the reject rule", err)
+	}
+}
+
+func TestPolicyDialAddrLiteralIPSkipsResolver(t *testing.T) {
+	res := &stubResolver{result: resolver.Result{Err: errors.New("should not be called")}}
+	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res), "9.9.9.9:443")
+	if err != nil {
+		t.Fatalf("unexpected err = %v", err)
+	}
+	if addr.String() != "9.9.9.9:443" {
+		t.Fatalf("dial addr = %s, want 9.9.9.9:443", addr)
+	}
+	if res.callCount() != 0 {
+		t.Fatalf("resolver calls = %d, want 0 for an IP literal", res.callCount())
+	}
+}
+
+func TestPolicyDialAddrNothingConfiguredKeepsFqdn(t *testing.T) {
+	// With neither dependency there is nothing to resolve for: the dialer
+	// resolves the name at connect time, as it did before the resolver existed.
+	p := newOutboundPolicy(nil, nil)
+	if p.active() {
+		t.Fatal("expected an empty policy to be inactive")
+	}
+	dst := M.ParseSocksaddr("example.com:443")
+	addr, err := tcpDialAddr(t, p, "example.com:443")
+	if err != nil || addr != dst {
+		t.Fatalf("expected (%v, nil), got (%v, %v)", dst, addr, err)
 	}
 }
 
@@ -71,6 +212,7 @@ func (s *stubPacketConn) ReadPacket(b *buf.Buffer) (M.Socksaddr, error) {
 }
 
 func (s *stubPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) error {
+	defer b.Release()
 	s.written = append(s.written, destination.String())
 	return nil
 }
@@ -81,7 +223,7 @@ func (s *stubPacketConn) SetDeadline(t time.Time) error      { return nil }
 func (s *stubPacketConn) SetReadDeadline(t time.Time) error  { return nil }
 func (s *stubPacketConn) SetWriteDeadline(t time.Time) error { return nil }
 
-func writeTestPacket(t *testing.T, c *aclPacketConn, addr string) {
+func writeTestPacket(t *testing.T, c N.PacketConn, addr string) {
 	t.Helper()
 	b := buf.NewSize(1)
 	defer b.Release()
@@ -91,10 +233,15 @@ func writeTestPacket(t *testing.T, c *aclPacketConn, addr string) {
 	}
 }
 
-func TestACLPacketConnRejectDrops(t *testing.T) {
-	e := testEngine(t, "reject(all, udp/443)\nreject(10.0.0.0/8)\ndirect(all)\n")
+func newTestPacketConn(t *testing.T, p *outboundPolicy) (*stubPacketConn, *policyPacketConn) {
+	t.Helper()
 	stub := &stubPacketConn{}
-	c := newACLPacketConn(stub, e).(*aclPacketConn)
+	return stub, newPolicyPacketConn(context.Background(), stub, p).(*policyPacketConn)
+}
+
+func TestPolicyPacketConnRejectDrops(t *testing.T) {
+	p := newOutboundPolicy(testEngine(t, "reject(all, udp/443)\nreject(10.0.0.0/8)\ndirect(all)\n"), nil)
+	stub, c := newTestPacketConn(t, p)
 
 	writeTestPacket(t, c, "8.8.8.8:443") // rejected by proto/port
 	writeTestPacket(t, c, "10.1.2.3:53") // rejected by CIDR
@@ -110,13 +257,39 @@ func TestACLPacketConnRejectDrops(t *testing.T) {
 	}
 }
 
-func TestACLPacketConnHijackRewrites(t *testing.T) {
-	e := testEngine(t, "direct(8.8.8.8, udp/53, 1.1.1.1)\ndirect(all)\n")
-	stub := &stubPacketConn{}
-	c := newACLPacketConn(stub, e)
+func TestPolicyPacketConnHijackRewrites(t *testing.T) {
+	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8, udp/53, 1.1.1.1)\ndirect(all)\n"), nil)
+	stub, c := newTestPacketConn(t, p)
 
-	writeTestPacket(t, c.(*aclPacketConn), "8.8.8.8:53")
+	writeTestPacket(t, c, "8.8.8.8:53")
 	if len(stub.written) != 1 || stub.written[0] != "1.1.1.1:53" {
 		t.Fatalf("written = %v, want [1.1.1.1:53]", stub.written)
+	}
+}
+
+func TestPolicyPacketConnResolvesAndCaches(t *testing.T) {
+	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
+	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res))
+
+	writeTestPacket(t, c, "example.com:53")
+	writeTestPacket(t, c, "example.com:53")
+
+	if len(stub.written) != 2 || stub.written[0] != "1.2.3.4:53" || stub.written[1] != "1.2.3.4:53" {
+		t.Fatalf("written = %v, want two 1.2.3.4:53 packets", stub.written)
+	}
+	if res.callCount() != 1 {
+		t.Fatalf("resolver calls = %d, want 1 (decision cached per destination)", res.callCount())
+	}
+}
+
+func TestPolicyPacketConnDropsOnResolveFailure(t *testing.T) {
+	// A resolve failure drops the packet but keeps the stream alive: it
+	// multiplexes other destinations that may resolve fine.
+	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
+	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res))
+
+	writeTestPacket(t, c, "example.com:53")
+	if len(stub.written) != 0 {
+		t.Fatalf("written = %v, want the packet dropped", stub.written)
 	}
 }
