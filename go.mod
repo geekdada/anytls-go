@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/chen3feng/stl4go v0.1.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/miekg/dns v1.1.72
 	github.com/sagernet/sing v0.5.1
 	github.com/sirupsen/logrus v1.9.3
 	golang.org/x/net v0.57.0
@@ -14,6 +15,9 @@ require (
 )
 
 require (
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 )
