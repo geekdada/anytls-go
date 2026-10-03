@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -77,5 +78,22 @@ func TestPolicyPacketConnDropsPrivate(t *testing.T) {
 	writeTestPacket(t, c, "1.1.1.1:53")
 	if len(stub.written) != 1 || stub.written[0] != "1.1.1.1:53" {
 		t.Fatalf("written = %v, want only 1.1.1.1:53", stub.written)
+	}
+}
+
+func TestClientErrorHidesDetails(t *testing.T) {
+	tests := []struct {
+		err  error
+		want error
+	}{
+		{errACLRejected, errClientBlocked},
+		{errPrivateDestination, errClientBlocked},
+		{fmt.Errorf("wrapped: %w", resolver.Error{Err: errors.New("read udp 10.0.0.53:53: i/o timeout")}), errClientResolveFailed},
+		{errors.New("dial tcp 10.9.9.9:443: connection refused"), errClientDialFailed},
+	}
+	for _, tt := range tests {
+		if got := clientError(tt.err); got != tt.want {
+			t.Errorf("clientError(%v) = %v, want %v", tt.err, got, tt.want)
+		}
 	}
 }
