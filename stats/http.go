@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -76,7 +77,7 @@ func Serve(ctx context.Context, opts ServerOptions) error {
 
 func auth(secret string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if secret != "" && r.Header.Get("Authorization") != secret {
+		if secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(secret)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

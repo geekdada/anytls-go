@@ -680,6 +680,18 @@ func TestLoadFileResolverValidation(t *testing.T) {
 	}
 }
 
+func TestLoadFileStatsRequiresSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.yaml")
+	body := "password: hunter2\ntrafficStats:\n  listen: \":9999\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadFile(path)
+	if err == nil || !strings.Contains(err.Error(), "trafficStats.secret") {
+		t.Fatalf("err = %v, want a trafficStats.secret error", err)
+	}
+}
+
 func TestLoadFileOutboundAllowPrivate(t *testing.T) {
 	dir := t.TempDir()
 	tests := []struct {

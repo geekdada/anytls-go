@@ -166,6 +166,9 @@ func LoadFile(path string) (*Config, error) {
 	if err := c.ValidateResolver(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
+	if err := c.ValidateStats(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
 	return c, nil
 }
 
@@ -223,6 +226,15 @@ func (c *Config) AuthMaxConcurrent() int {
 		return defaultAuthMaxConcurrent
 	}
 	return c.Auth.HTTP.MaxConcurrent
+}
+
+// ValidateStats requires a secret whenever the stats API is enabled. The API
+// can kick users and lists every user's destinations.
+func (c *Config) ValidateStats() error {
+	if c.StatsEnabled() && c.TrafficStats.Secret == "" {
+		return fmt.Errorf("trafficStats.secret is required when trafficStats.listen is set")
+	}
+	return nil
 }
 
 // StatsEnabled reports whether the traffic-stats HTTP API should be started.
