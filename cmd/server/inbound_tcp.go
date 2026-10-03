@@ -12,11 +12,22 @@ import (
 	"net"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sirupsen/logrus"
+)
+
+// Variables so tests can shorten them.
+var (
+	// handshakeTimeout bounds the TLS handshake plus reading the auth packet,
+	// so a client that connects and stays silent cannot hold a connection.
+	handshakeTimeout = 10 * time.Second
+	// requestTimeout bounds reading a new stream's target address (and the
+	// UoT request), so idle streams cannot pile up on a session.
+	requestTimeout = 10 * time.Second
 )
 
 func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
@@ -26,8 +37,10 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 	}()
 
-	c = tls.Server(c, s.tlsConfig)
+	tlsConn := tls.Server(c, s.tlsConfig)
+	c = tlsConn
 	defer c.Close()
+	_ = tlsConn.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	b := buf.NewPacket()
 	defer b.Release()
@@ -71,6 +84,8 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 	}
 
+	_ = tlsConn.SetDeadline(time.Time{})
+
 	var conn *stats.Conn
 	if s.stats != nil {
 		conn = s.stats.AcquireConn(id, c.RemoteAddr().String())
@@ -91,6 +106,7 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}()
 		defer stream.Close()
 
+		_ = stream.SetReadDeadline(time.Now().Add(requestTimeout))
 		destination, err := M.SocksaddrSerializer.ReadAddrPort(stream)
 		if err != nil {
 			logrus.Debugln("ReadAddrPort:", err)
@@ -106,8 +122,10 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 
 		if strings.Contains(destination.String(), "udp-over-tcp.arpa") {
+			// proxyOutboundUoT clears the deadline once the UoT request is read.
 			proxyOutboundUoT(ctx, stream, destination, st, s.policy)
 		} else {
+			_ = stream.SetReadDeadline(time.Time{})
 			proxyOutboundTCP(ctx, stream, destination, st, s.policy)
 		}
 	}, &padding.DefaultPaddingFactory)

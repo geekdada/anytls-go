@@ -6,6 +6,7 @@ import (
 	"anytls/stats"
 	"context"
 	"net"
+	"time"
 
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -50,6 +51,7 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksadd
 		logrus.Debugln("proxyOutboundUoT ReadRequest:", err)
 		return err
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 
 	c, err := net.ListenPacket("udp", "")
 	if err != nil {
