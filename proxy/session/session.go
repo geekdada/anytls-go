@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"runtime/debug"
@@ -21,6 +22,14 @@ import (
 )
 
 var clientDebugPaddingScheme = os.Getenv("CLIENT_DEBUG_PADDING_SCHEME") == "1"
+
+// maxServerStreams caps concurrently open streams per server session. The
+// protocol has no flow control, so without a cap one authenticated client can
+// open streams until the server runs out of memory.
+const maxServerStreams = 1024
+
+// maxFramePayload is the largest payload the 16-bit frame length can carry.
+const maxFramePayload = math.MaxUint16
 
 type Session struct {
 	conn     net.Conn
@@ -42,7 +51,7 @@ type Session struct {
 	idleSince time.Time
 	padding   *atomic.TypedValue[*padding.PaddingFactory]
 
-	peerVersion byte
+	peerVersion atomic.Uint32
 
 	// client
 	isClient    bool
@@ -165,7 +174,7 @@ func (s *Session) OpenStream() (*Stream, error) {
 
 	//logrus.Debugln("stream open", sid, s.streams)
 
-	if sid >= 2 && s.peerVersion >= 2 {
+	if sid >= 2 && s.peerVersion.Load() >= 2 {
 		s.synDoneLock.Lock()
 		if s.synDone != nil {
 			s.synDone()
@@ -180,7 +189,10 @@ func (s *Session) OpenStream() (*Stream, error) {
 		return nil, err
 	}
 
-	s.buffering = false // proxy Write it's SocksAddr to flush the buffer
+	// proxy Write it's SocksAddr to flush the buffer
+	s.connLock.Lock()
+	s.buffering = false
+	s.connLock.Unlock()
 
 	s.streamLock.Lock()
 	defer s.streamLock.Unlock()
@@ -235,19 +247,11 @@ func (s *Session) recvLoop() error {
 					s.writeControlFrame(f)
 					return nil
 				}
-				s.streamLock.Lock()
-				if _, ok := s.streams[sid]; !ok {
-					stream := newStream(sid, s)
-					s.streams[sid] = stream
-					go func() {
-						if s.onNewStream != nil {
-							s.onNewStream(stream)
-						} else {
-							stream.Close()
-						}
-					}()
+				if !s.acceptStream(sid) {
+					if err := s.refuseStream(sid); err != nil {
+						return err
+					}
 				}
-				s.streamLock.Unlock()
 			case cmdSYNACK: // should be client only
 				s.synDoneLock.Lock()
 				if s.synDone != nil {
@@ -311,7 +315,7 @@ func (s *Session) recvLoop() error {
 						}
 						// check client's version
 						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
-							s.peerVersion = byte(v)
+							s.peerVersion.Store(uint32(v))
 							// send cmdServerSettings
 							f := newFrame(cmdServerSettings, 0)
 							f.data = util.StringMap{
@@ -371,8 +375,8 @@ func (s *Session) recvLoop() error {
 					if s.isClient {
 						// check server's version
 						m := util.StringMapFromBytes(buffer)
-						if v, err := strconv.Atoi(m["v"]); err == nil {
-							s.peerVersion = byte(v)
+						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 0 {
+							s.peerVersion.Store(uint32(v))
 						}
 					}
 					buf.Put(buffer)
@@ -386,6 +390,43 @@ func (s *Session) recvLoop() error {
 	}
 }
 
+// acceptStream registers a stream for a SYN and starts its handler. It returns
+// false when the session already has maxServerStreams open streams. A SYN for
+// a stream that is already open is ignored.
+func (s *Session) acceptStream(sid uint32) bool {
+	s.streamLock.Lock()
+	defer s.streamLock.Unlock()
+	if _, ok := s.streams[sid]; ok {
+		return true
+	}
+	if !s.isClient && len(s.streams) >= maxServerStreams {
+		return false
+	}
+	stream := newStream(sid, s)
+	s.streams[sid] = stream
+	go func() {
+		if s.onNewStream != nil {
+			s.onNewStream(stream)
+		} else {
+			stream.Close()
+		}
+	}()
+	return true
+}
+
+// refuseStream tells the client a stream was not opened. A v2 client waits for
+// SYNACK and closes the whole session if none arrives, so it gets a SYNACK
+// carrying an error. A v1 client gets a FIN.
+func (s *Session) refuseStream(sid uint32) error {
+	f := newFrame(cmdFIN, sid)
+	if s.peerVersion.Load() >= 2 {
+		f = newFrame(cmdSYNACK, sid)
+		f.data = []byte("too many streams")
+	}
+	_, err := s.writeControlFrame(f)
+	return err
+}
+
 func (s *Session) streamClosed(sid uint32) error {
 	if s.IsClosed() {
 		return io.ErrClosedPipe
@@ -397,21 +438,33 @@ func (s *Session) streamClosed(sid uint32) error {
 	return err
 }
 
+// writeDataFrame splits data into frames no larger than the 16-bit length
+// field allows. A larger single frame would wrap the length and desync the
+// stream.
 func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
-	dataLen := len(data)
+	written := 0
+	for {
+		chunk := data[:min(len(data), maxFramePayload)]
+		if err := s.writeDataChunk(sid, chunk); err != nil {
+			return written, err
+		}
+		written += len(chunk)
+		data = data[len(chunk):]
+		if len(data) == 0 {
+			return written, nil
+		}
+	}
+}
 
-	buffer := buf.NewSize(dataLen + headerOverHeadSize)
+func (s *Session) writeDataChunk(sid uint32, data []byte) error {
+	buffer := buf.NewSize(len(data) + headerOverHeadSize)
+	defer buffer.Release()
 	buffer.WriteByte(cmdPSH)
 	binary.BigEndian.PutUint32(buffer.Extend(4), sid)
-	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
+	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(len(data)))
 	buffer.Write(data)
 	_, err := s.writeConn(buffer.Bytes())
-	buffer.Release()
-	if err != nil {
-		return 0, err
-	}
-
-	return dataLen, nil
+	return err
 }
 
 func (s *Session) writeControlFrame(frame frame) (int, error) {
