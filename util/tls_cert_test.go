@@ -50,6 +50,7 @@ func TestFileCertificateLoader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loader.checkInterval = 0
 	got, err := loader.GetCertificate(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +87,7 @@ func TestFileCertificateLoaderReloadFailureServesCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loader.checkInterval = 0
 	got, err := loader.GetCertificate(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -131,5 +133,40 @@ func TestNewFileCertificateLoaderMissingCert(t *testing.T) {
 	_, err := NewFileCertificateLoader(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "missing.key"))
 	if err == nil {
 		t.Fatal("expected error for missing cert")
+	}
+}
+
+func TestFileCertificateLoaderThrottlesChecks(t *testing.T) {
+	dir := t.TempDir()
+	first, err := GenerateKeyPair(time.Now, "first.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath, keyPath := writeCertKey(t, dir, "server", first)
+	loader, err := NewFileCertificateLoader(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader.checkInterval = time.Hour
+	if _, err := loader.GetCertificate(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := GenerateKeyPair(time.Now, "second.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCertKey(t, dir, "server", second)
+	future := time.Now().Add(time.Second)
+	if err := os.Chtimes(certPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loader.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if certCN(t, got) != "first.example.com" {
+		t.Fatalf("CN = %q, want the cached first.example.com inside the check interval", certCN(t, got))
 	}
 }

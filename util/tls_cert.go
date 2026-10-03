@@ -5,26 +5,36 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
+// certCheckInterval limits how often GetCertificate stats the cert files. A
+// check per handshake costs two syscalls, and a changed file would otherwise
+// be reloaded by every concurrent handshake at once.
+const certCheckInterval = time.Second
+
 type FileCertificateLoader struct {
 	certPath string
 	keyPath  string
 
-	mu           sync.RWMutex
-	cert         *tls.Certificate
-	modTime      time.Time
+	mu            sync.RWMutex
+	cert          *tls.Certificate
+	modTime       time.Time
 	lastLoggedErr string
 	lastLoggedAt  time.Time
+
+	checkInterval time.Duration
+	lastCheck     atomic.Int64 // unix nanos
 }
 
 func NewFileCertificateLoader(certPath, keyPath string) (*FileCertificateLoader, error) {
 	l := &FileCertificateLoader{
-		certPath: certPath,
-		keyPath:  keyPath,
+		certPath:      certPath,
+		keyPath:       keyPath,
+		checkInterval: certCheckInterval,
 	}
 	if err := l.reload(); err != nil {
 		return nil, err
@@ -33,7 +43,10 @@ func NewFileCertificateLoader(certPath, keyPath string) (*FileCertificateLoader,
 }
 
 func (l *FileCertificateLoader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	reloadErr := l.reloadIfChanged()
+	var reloadErr error
+	if l.dueForCheck() {
+		reloadErr = l.reloadIfChanged()
+	}
 	l.mu.RLock()
 	cert := l.cert
 	l.mu.RUnlock()
@@ -44,6 +57,17 @@ func (l *FileCertificateLoader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certi
 		l.logReloadError(reloadErr)
 	}
 	return cert, nil
+}
+
+// dueForCheck lets one handshake per interval check the files. The CAS makes
+// concurrent handshakes skip instead of reloading in parallel.
+func (l *FileCertificateLoader) dueForCheck() bool {
+	now := time.Now().UnixNano()
+	last := l.lastCheck.Load()
+	if now-last < int64(l.checkInterval) {
+		return false
+	}
+	return l.lastCheck.CompareAndSwap(last, now)
 }
 
 func (l *FileCertificateLoader) logReloadError(err error) {
