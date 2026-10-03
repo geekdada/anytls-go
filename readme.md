@@ -43,7 +43,7 @@ curl -fsSL https://308.li/anytls-go | bash -s -- uninstall
 
 ## 快速食用方法
 
-为了方便，示例服务器和客户端默认采用不安全的配置，该配置假设您不会遭遇 TLS 中间人攻击（这种情况偶尔发生在网络接入层，在骨干网络上几乎不可能实现）；否则，您的通信内容可能会被中间人截获。
+示例服务器未配置证书时会生成临时自签证书。示例客户端默认校验服务器证书，连接这类服务器时需加 `-insecure`（或在 URI 中写 `insecure=1`）。跳过校验后，中间人可以截获通信内容和握手凭据 `sha256(password)`，并用该凭据冒充您连接服务器。生产环境请为服务器配置受信任的证书（见 `tls` 配置）。
 
 ### 示例服务器
 
@@ -56,15 +56,16 @@ curl -fsSL https://308.li/anytls-go | bash -s -- uninstall
 ### 示例客户端
 
 ```
-./anytls-client -l 127.0.0.1:1080 -s 服务器ip:端口 -p 密码
+./anytls-client -l 127.0.0.1:1080 -s 服务器ip:端口 -p 密码 -insecure
 ```
 
-`127.0.0.1:1080` 为本机 Socks5 代理监听地址，理论上支持 TCP 和 UDP(通过 udp over tcp 传输)。
+`127.0.0.1:1080` 为本机 Socks5 代理监听地址，理论上支持 TCP 和 UDP(通过 udp over tcp 传输)。服务器使用受信任证书时去掉 `-insecure`；证书域名与服务器地址不同时用 `-sni` 指定。
 
 v0.0.12 版本起，示例客户端可直接使用 URI 格式:
 
 ```
 ./anytls-client -l 127.0.0.1:1080 -s "anytls://password@host:port"
+./anytls-client -l 127.0.0.1:1080 -s "anytls://password@host:port/?insecure=1"
 ```
 
 ### sing-box
@@ -85,7 +86,7 @@ Shadowrocket 2.2.65+ 实现了 anytls 协议的客户端。
 
 ## 本分支相对上游的改动
 
-本分支在上游 `anytls-go` 的基础上，为**服务端**新增了五个子系统，与 [hysteria 2](https://github.com/apernet/hysteria) 的对应功能保持一致（请求/响应格式、接口路径与副作用均对齐）。客户端与线路协议未作改动，完全向后兼容。
+本分支在上游 `anytls-go` 的基础上，为**服务端**新增了五个子系统，与 [hysteria 2](https://github.com/apernet/hysteria) 的对应功能保持一致（请求/响应格式、接口路径与副作用均对齐）。线路协议未作改动，与上游客户端互通。示例客户端改为默认校验服务器证书（见上文），旧的启动命令连接自签证书服务器时需加 `-insecure`。
 
 ### YAML 配置文件（`-c`）
 
@@ -110,6 +111,7 @@ auth:
     cacheTTL: 60s        # 缓存成功鉴权结果的时长，留空默认 10s，"0" 关闭缓存
     cacheSize: 4096      # 缓存条目上限，默认 4096
     negativeCacheTTL: 60s # 缓存拒绝结果的时长，留空默认 60s，"0" 关闭
+    maxConcurrent: 64    # 同时进行的后端请求上限，默认 64
 
 # ACL 规则（可选，file 与 inline 二选一，均留空则不启用）
 acl:
@@ -142,10 +144,14 @@ resolver:
   #   sni: cloudflare-dns.com
   #   insecure: false
 
-# 流量统计 HTTP API（可选，listen 留空则不启动）
+# 流量统计 HTTP API（可选，listen 留空则不启动；启用时 secret 必填）
 trafficStats:
   listen: 127.0.0.1:9999
   secret: 你的密钥
+
+# 出站目标限制（可选）
+outbound:
+  allowPrivate: false   # 默认 false：禁止客户端访问回环、内网、链路本地等地址
 
 # 带宽限速（可选，留空或 0 表示不限速）
 bandwidth:
@@ -163,13 +169,14 @@ bandwidth:
   - `variant` 固定为 `geekdada/anytls-go`，用于让被多种代理协议共用的后端区分出 anytls-go 的请求。
 - 响应：仅 HTTP `200` 视为成功，响应体 `{"ok": true, "id": "用户标识"}`。`ok=true` 时 `id` 原样透传（允许为空）；其余状态码或 `ok=false` 均拒绝。
 - 客户端 10s 超时；`insecure` 控制是否跳过 TLS 校验；无重试。
+- 同时进行的后端请求不超过 `maxConcurrent`（默认 64）。每个未命中缓存的握手都会请求后端，未鉴权的客户端可以用随机凭据持续发起握手，该上限避免请求在后端堆积。等待 2s 仍无空闲名额的握手按后端错误处理（拒绝且不缓存）。
 - `cacheTTL > 0` 时缓存**成功**结果，重连可跳过后端调用（留空默认 `10s`，设为 `"0"` 关闭）；同时按 `negativeCacheTTL` 缓存**拒绝**结果（`ok=false`），使不断重连的失效凭据不再反复打到后端（留空默认 `60s`，设为 `"0"` 可关闭）。**后端错误（非 200/网络故障）始终穿透**，不会被缓存，故后端故障不会误锁合法用户。成功与拒绝使用相互独立的缓存，避免大量不同的错误凭据挤占正常缓存条目。
 
 返回的 `id` 是流量统计的稳定键。未配置 HTTP 鉴权时，使用单一 `password`，其 `id` 为由密码哈希派生的稳定合成值（不泄露密码）。
 
 ### 流量统计 HTTP API
 
-配置 `trafficStats.listen` 后启动，所有接口通过 `Authorization: <secret>` 头鉴权（`secret` 为空则不鉴权），与 hysteria 2 的接口一致：
+配置 `trafficStats.listen` 后启动，所有接口通过 `Authorization: <secret>` 头鉴权，与 hysteria 2 的接口一致。`secret` 必填，留空时启动失败，因为该 API 可以踢下线任意用户并列出所有用户的访问目标：
 
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
@@ -197,6 +204,22 @@ bandwidth:
 - `geoip:`/`geosite:` 使用 v2ray 数据文件；未配置 `acl.geoip`/`acl.geosite` 路径时自动下载（Loyalsoldier v2ray-rules-dat），并按 `acl.geoUpdateInterval` 周期更新（默认 7 天）。
 - `file` 与 `inline` 互斥；规则编译失败会导致启动失败。
 
+### 出站目标限制
+
+默认禁止客户端连接以下地址：回环（`127.0.0.0/8`、`::1`）、私有网段（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`fc00::/7`）、链路本地（`169.254.0.0/16`、`fe80::/10`，含云服务器元数据地址 `169.254.169.254`）、共享地址（`100.64.0.0/10`）、`0.0.0.0/8`、广播与组播地址。这样代理用户无法访问服务器本机的服务（例如流量统计 API）、服务器所在内网或云元数据接口。
+
+- 域名目标会先解析，按解析出的 IP 检查并直接拨该 IP，域名指向内网地址同样会被拒绝。未配置 `resolver` 时使用系统解析器。
+- 检查在 ACL 之后进行：ACL 的 `reject` 优先；ACL 劫持规则的目标地址由运维指定，不受此限制。
+- TCP 请求被拒时客户端收到 `blocked by server policy`；UDP（udp over tcp）报文静默丢弃、流保持存活。
+- 需要通过代理访问内网时设置 `outbound.allowPrivate: true`，启动日志会给出警告。
+
+### 连接保护
+
+- TLS 握手与读取鉴权数据须在 10s 内完成，否则断开连接，避免静默连接长期占用资源。
+- 新建流后须在 10s 内发来目标地址（UoT 还包括 UoT 请求头），否则关闭该流。
+- 每条 TLS 会话最多同时打开 1024 条流。超出时 v2 客户端收到带错误信息的 `SYNACK`，v1 客户端收到 `FIN`。
+- 发给客户端的出站错误只包含类别（`blocked by server policy`、`resolve failed`、`dial failed`），完整错误只记录在服务端日志中，避免泄露解析器地址等内部信息。
+
 ### 自定义 DNS 解析器
 
 配置 `resolver` 后，服务端用指定的 DNS 服务器解析出站目标域名，语义与 [hysteria 2 的 resolver](https://v2.hysteria.network/zh/docs/advanced/Full-Server-Config/#resolver) 一致：
@@ -209,8 +232,9 @@ bandwidth:
 - 配置了自定义解析器后，**无论是否启用 ACL**，服务端都用它解析域名并直连解析结果。解析不出任何地址时 TCP 请求失败（错误形如 `resolve error: ...`），**不回退系统解析器**，避免 DNS 泄漏；UDP（udp over tcp）报文静默丢弃、流保持存活（与 ACL 拒绝的报文同样处理，因为一条流复用多个目标）。
 - 解析失败仍会先过 ACL：域名类 `reject` 规则照常生效，劫持规则也能救回解析不出的域名（与 hysteria 的 `Resolver(ACL(outbound))` 顺序一致）。
 - 目标本身是 IP 时不发起任何查询。
-- 未配置（或 `system`）时行为与之前完全一致：启用 ACL 时用系统解析器预解析以便 IP 规则命中域名请求；未启用 ACL 时不预解析，由拨号器自行解析。
+- 未配置（或 `system`）时：启用 ACL 或[出站目标限制](#出站目标限制)（默认启用）时用系统解析器预解析；只有设置 `outbound.allowPrivate: true` 且未启用 ACL 时才不预解析，由拨号器自行解析。
 - 无 DNS 缓存（与 hysteria 一致）；UDP 路径按目标地址在流生命周期内缓存决策。双栈时优先 IPv4，不做 Happy Eyeballs 竞速。
+- `tcp` 与 `tls` 解析器复用到 DNS 服务器的连接（每个解析器最多保留 8 条空闲连接），避免每次查询都重新进行 TCP/TLS 握手；服务器关闭了空闲连接时自动换新连接重发。`udp` 每次查询使用新套接字，`https` 由 HTTP 客户端复用连接。
 - 该配置仅作用于服务端出站解析；客户端与 `acl.geoip`/`acl.geosite` 数据文件下载仍走系统解析器（与 hysteria 相同）。
 
 ### 带宽限速
