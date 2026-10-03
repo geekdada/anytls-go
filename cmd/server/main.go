@@ -187,7 +187,10 @@ func main() {
 		}()
 	}
 
-	server := NewMyServer(tlsConfig, authn, registry, limits, aclEngine, dnsResolver)
+	if cfg.Outbound.AllowPrivate {
+		logrus.Warnln("[Outbound] private destinations allowed: clients can reach the server's loopback and LAN")
+	}
+	server := NewMyServer(tlsConfig, authn, registry, limits, aclEngine, dnsResolver, !cfg.Outbound.AllowPrivate)
 
 	go func() {
 		<-ctx.Done()

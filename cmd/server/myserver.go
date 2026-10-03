@@ -18,12 +18,12 @@ type myServer struct {
 	policy    *outboundPolicy
 }
 
-func NewMyServer(tlsConfig *tls.Config, a auth.Authenticator, reg *stats.Registry, lim *limiter.Registry, aclEngine *acl.Engine, res resolver.Resolver) *myServer {
+func NewMyServer(tlsConfig *tls.Config, a auth.Authenticator, reg *stats.Registry, lim *limiter.Registry, aclEngine *acl.Engine, res resolver.Resolver, blockPrivate bool) *myServer {
 	return &myServer{
 		tlsConfig: tlsConfig,
 		auth:      a,
 		stats:     reg,
 		limits:    lim,
-		policy:    newOutboundPolicy(aclEngine, res),
+		policy:    newOutboundPolicy(aclEngine, res, blockPrivate),
 	}
 }

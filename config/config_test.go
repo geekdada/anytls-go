@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -676,5 +677,29 @@ func TestLoadFileResolverValidation(t *testing.T) {
 				t.Errorf("err = %v, want it to mention %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadFileOutboundAllowPrivate(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		body string
+		want bool
+	}{
+		{body: "password: hunter2\n", want: false},
+		{body: "password: hunter2\noutbound:\n  allowPrivate: true\n", want: true},
+	}
+	for i, tt := range tests {
+		path := filepath.Join(dir, fmt.Sprintf("outbound-%d.yaml", i))
+		if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Outbound.AllowPrivate != tt.want {
+			t.Errorf("case %d: AllowPrivate = %v, want %v", i, c.Outbound.AllowPrivate, tt.want)
+		}
 	}
 }

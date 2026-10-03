@@ -26,6 +26,15 @@ type Config struct {
 	Resolver      ResolverConfig     `yaml:"resolver"`
 	TrafficStats  TrafficStatsConfig `yaml:"trafficStats"`
 	Bandwidth     BandwidthConfig    `yaml:"bandwidth"`
+	Outbound      OutboundConfig     `yaml:"outbound"`
+}
+
+// OutboundConfig controls where clients may connect through the server.
+type OutboundConfig struct {
+	// AllowPrivate lets clients reach loopback, private, link-local, CGNAT and
+	// multicast addresses. It is off by default so a proxy user cannot reach
+	// the server's own services, its LAN or a cloud metadata endpoint.
+	AllowPrivate bool `yaml:"allowPrivate"`
 }
 
 // ResolverConfig mirrors hysteria 2's resolver block: it selects the DNS server
