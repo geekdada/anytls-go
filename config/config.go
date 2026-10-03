@@ -14,6 +14,7 @@ import (
 const (
 	defaultAuthCacheTTL         = 10 * time.Second
 	defaultAuthNegativeCacheTTL = 60 * time.Second
+	defaultAuthMaxConcurrent    = 64
 )
 
 type Config struct {
@@ -111,6 +112,10 @@ type HTTPAuthConfig struct {
 	// uses defaultAuthNegativeCacheTTL; "0" disables it. Backend errors are
 	// never cached.
 	NegativeCacheTTL string `yaml:"negativeCacheTTL"`
+	// MaxConcurrent bounds in-flight backend calls (default 64). Every
+	// handshake with an unseen credential reaches the backend, so this keeps
+	// unauthenticated connection floods from piling requests onto it.
+	MaxConcurrent int `yaml:"maxConcurrent"`
 }
 
 type TrafficStatsConfig struct {
@@ -211,6 +216,15 @@ func (c *Config) UseHTTPAuth() bool {
 	return c.Auth.Type == "http" && c.Auth.HTTP.URL != ""
 }
 
+// AuthMaxConcurrent returns the in-flight backend call limit, applying the
+// default when unset.
+func (c *Config) AuthMaxConcurrent() int {
+	if c.Auth.HTTP.MaxConcurrent <= 0 {
+		return defaultAuthMaxConcurrent
+	}
+	return c.Auth.HTTP.MaxConcurrent
+}
+
 // StatsEnabled reports whether the traffic-stats HTTP API should be started.
 func (c *Config) StatsEnabled() bool {
 	return c.TrafficStats.Listen != ""
@@ -260,6 +274,9 @@ func (c *Config) ValidateAuth() error {
 	case "http":
 		if c.Auth.HTTP.URL == "" {
 			return fmt.Errorf("auth.type http requires auth.http.url")
+		}
+		if c.Auth.HTTP.MaxConcurrent < 0 {
+			return fmt.Errorf("auth.http.maxConcurrent %d must not be negative", c.Auth.HTTP.MaxConcurrent)
 		}
 		return nil
 	default:

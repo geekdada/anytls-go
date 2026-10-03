@@ -17,6 +17,11 @@ type HTTPAuthenticator struct {
 	client *http.Client
 }
 
+// maxIdleBackendConns keeps enough idle connections for concurrent handshakes.
+// The transport default of 2 per host makes a plain-HTTP backend open and close
+// a connection for most calls under load.
+const maxIdleBackendConns = 64
+
 // authVariant identifies this protocol implementation so a backend shared by
 // multiple proxy protocols can distinguish anytls-go requests.
 const authVariant = "geekdada/anytls-go"
@@ -41,6 +46,7 @@ func NewHTTPAuthenticator(url string, insecure bool) *HTTPAuthenticator {
 	// as hysteria 2 does.
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecure}
+	tr.MaxIdleConnsPerHost = maxIdleBackendConns
 	return &HTTPAuthenticator{
 		url: url,
 		client: &http.Client{

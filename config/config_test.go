@@ -703,3 +703,35 @@ func TestLoadFileOutboundAllowPrivate(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthMaxConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	base := "auth:\n  type: http\n  http:\n    url: http://backend/auth\n"
+
+	c, err := LoadFile(write("default.yaml", base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.AuthMaxConcurrent(); got != defaultAuthMaxConcurrent {
+		t.Errorf("default = %d, want %d", got, defaultAuthMaxConcurrent)
+	}
+
+	c, err = LoadFile(write("explicit.yaml", base+"    maxConcurrent: 8\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.AuthMaxConcurrent(); got != 8 {
+		t.Errorf("explicit = %d, want 8", got)
+	}
+
+	if _, err := LoadFile(write("negative.yaml", base+"    maxConcurrent: -1\n")); err == nil {
+		t.Error("expected a negative maxConcurrent to fail")
+	}
+}

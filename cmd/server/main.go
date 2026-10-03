@@ -25,6 +25,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// authBackendSlotWait is how long a handshake waits for a free auth backend
+// slot before it is rejected.
+const authBackendSlotWait = 2 * time.Second
+
 func main() {
 	configPath := flag.String("c", "", "path to YAML config file")
 	listen := flag.String("l", "0.0.0.0:8443", "server listen port")
@@ -78,7 +82,8 @@ func main() {
 	switch {
 	case cfg.UseHTTPAuth():
 		authn = auth.NewHTTPAuthenticator(cfg.Auth.HTTP.URL, cfg.Auth.HTTP.Insecure)
-		logrus.Infoln("[Auth] using HTTP backend at", cfg.Auth.HTTP.URL)
+		authn = auth.NewLimitedAuthenticator(authn, cfg.AuthMaxConcurrent(), authBackendSlotWait)
+		logrus.Infoln("[Auth] using HTTP backend at", cfg.Auth.HTTP.URL, "max concurrent", cfg.AuthMaxConcurrent())
 		if ttl, _ := cfg.AuthCacheTTL(); ttl > 0 {
 			size := cfg.Auth.HTTP.CacheSize
 			if size <= 0 {
