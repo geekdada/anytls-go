@@ -23,9 +23,11 @@ var errCNAMEChainTooLong = errors.New("CNAME chain too long")
 
 // standardResolver talks to the configured DNS server over plain UDP, plain TCP
 // or DNS-over-TLS, all of which miekg/dns handles through dns.Client.Net.
+// TCP and TLS reuse connections through pool; UDP dials per query.
 type standardResolver struct {
 	addr   string
 	client *dns.Client
+	pool   *connPool
 }
 
 // NewUDP returns a resolver querying addr over plain UDP. A missing port
@@ -46,6 +48,7 @@ func NewTCP(addr string, timeout time.Duration) Resolver {
 			Net:     "tcp",
 			Timeout: timeoutOrDefault(timeout),
 		},
+		pool: newConnPool(),
 	}
 }
 
@@ -64,6 +67,7 @@ func NewTLS(addr string, timeout time.Duration, sni string, insecure bool) Resol
 				InsecureSkipVerify: insecure,
 			},
 		},
+		pool: newConnPool(),
 	}
 }
 
@@ -105,7 +109,7 @@ func (r *standardResolver) lookup(ctx context.Context, host string, qtype uint16
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(host), qtype)
 	m.RecursionDesired = true
-	resp, _, err := r.client.ExchangeContext(ctx, m, r.addr)
+	resp, err := r.exchange(ctx, m)
 	if err != nil {
 		return nil, err
 	}
