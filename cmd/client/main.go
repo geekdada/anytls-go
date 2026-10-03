@@ -24,6 +24,7 @@ func main() {
 	password := flag.String("p", "", "Password")
 	minIdleSession := flag.Int("m", 5, "Reserved min idle session")
 	disableReuse := flag.Bool("dr", false, "Disable client session reuse")
+	insecure := flag.Bool("insecure", false, "Skip server certificate verification")
 	flag.Parse()
 
 	if serverURL, err := url.Parse(*serverAddr); err == nil {
@@ -34,6 +35,9 @@ func main() {
 			}
 			query := serverURL.Query()
 			*sni = query.Get("sni")
+			if query.Get("insecure") == "1" {
+				*insecure = true
+			}
 		}
 	}
 
@@ -66,19 +70,14 @@ func main() {
 		logrus.Fatalln("listen socks5 tcp:", err)
 	}
 
-	// You can only use `InsecureSkipVerify` by default in the sample client; it is not recommended for use in production code.
-	tlsConfig := &tls.Config{
-		ServerName:         *sni,
-		InsecureSkipVerify: true,
-	}
-	if tlsConfig.ServerName == "" {
-		// disable the SNI
-		tlsConfig.ServerName = "127.0.0.1"
+	tlsConfig := newTLSConfig(*serverAddr, *sni, *insecure)
+	if *insecure {
+		logrus.Warnln("[Client] server certificate verification disabled")
 	}
 
 	path := strings.TrimSpace(os.Getenv("TLS_KEY_LOG"))
 	if path != "" {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 		if err == nil {
 			tlsConfig.KeyLogWriter = f
 		}
@@ -101,4 +100,21 @@ func main() {
 		}
 		go handleTcpConnection(ctx, c, client)
 	}
+}
+
+// newTLSConfig verifies the server certificate unless insecure is set. Without
+// verification a man in the middle can capture the auth credential, which is a
+// fixed sha256 of the password and can be replayed.
+func newTLSConfig(serverAddr, sni string, insecure bool) *tls.Config {
+	if insecure {
+		if sni == "" {
+			// An IP literal ServerName makes Go omit the SNI extension.
+			sni = "127.0.0.1"
+		}
+		return &tls.Config{ServerName: sni, InsecureSkipVerify: true}
+	}
+	if sni == "" {
+		sni, _, _ = net.SplitHostPort(serverAddr)
+	}
+	return &tls.Config{ServerName: sni}
 }
