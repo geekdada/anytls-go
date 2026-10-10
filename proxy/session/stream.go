@@ -32,6 +32,13 @@ type Stream struct {
 	// to a per-stream stats record so /dump/streams can report per-stream
 	// traffic. Read lock-free from the data path.
 	Counter TrafficCounter
+
+	// CountIdentity makes this stream count its bytes into Session.Identity.
+	// The server enables it on TCP streams once the target address is read,
+	// so the header stays out of user traffic as in hysteria. UoT streams
+	// leave it off and count the UDP payload at the packet layer instead.
+	// Set it before the stream's payload is read or written.
+	CountIdentity bool
 }
 
 // newStream initiates a Stream struct
@@ -54,7 +61,7 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 		// Server-side accounting: reading a stream yields the payload the client
 		// sent toward its target — the user's upload, which hysteria 2 reports as
 		// Tx. (Identity/Counter are only ever set on the server.)
-		if tc := s.sess.Identity; tc != nil {
+		if tc := s.sess.Identity; tc != nil && s.CountIdentity {
 			tc.AddTx(int64(n))
 		}
 		if tc := s.Counter; tc != nil {
@@ -79,7 +86,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		// Server-side accounting: writing to a stream sends the target's payload
 		// back to the client — the user's download, which hysteria 2 reports as
 		// Rx. (Identity/Counter are only ever set on the server.)
-		if tc := s.sess.Identity; tc != nil {
+		if tc := s.sess.Identity; tc != nil && s.CountIdentity {
 			tc.AddRx(int64(n))
 		}
 		if tc := s.Counter; tc != nil {

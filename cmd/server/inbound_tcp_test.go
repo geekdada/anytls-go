@@ -114,8 +114,21 @@ func TestUoTStreamIsNotTraced(t *testing.T) {
 			if rows := registry.DumpStreams(); len(rows) != 0 {
 				t.Fatalf("DumpStreams = %+v, want none", rows)
 			}
+			// Like hysteria, /traffic counts only the UDP payload, without the
+			// target address header or the per-packet UoT framing.
+			waitTraffic(t, registry, stats.TrafficEntry{Tx: 4, Rx: 4})
 		})
 	}
+}
+
+func TestTCPTrafficExcludesTargetHeader(t *testing.T) {
+	registry := stats.NewRegistry()
+	conn := openStream(t, registry, tcpEcho(t), []byte("ping"))
+	if got := readPSH(t, conn, 1); string(got) != "ping" {
+		t.Fatalf("echo = %q, want ping", got)
+	}
+	// Hysteria leaves the request header out of /traffic.
+	waitTraffic(t, registry, stats.TrafficEntry{Tx: 4, Rx: 4})
 }
 
 // openStream authenticates to a server that reports to registry and allows
@@ -171,6 +184,23 @@ func uotBody(t *testing.T, version uint8, target M.Socksaddr) []byte {
 	return body.Bytes()
 }
 
+// waitTraffic waits until registry holds one user with traffic want. The
+// server counts Rx after sending a frame, so the client can see the echo first.
+func waitTraffic(t *testing.T, registry *stats.Registry, want stats.TrafficEntry) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		traffic := registry.Snapshot()
+		if len(traffic) == 1 && onlyEntry(traffic) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("traffic = %+v, want one user with %+v", traffic, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // readPSH returns the data of the first PSH frame on sid, skipping control frames.
 func readPSH(t *testing.T, conn net.Conn, sid uint32) []byte {
 	t.Helper()
@@ -208,4 +238,33 @@ func udpEcho(t *testing.T) M.Socksaddr {
 		}
 	}()
 	return M.SocksaddrFromNet(pc.LocalAddr())
+}
+
+func onlyEntry(traffic map[string]stats.TrafficEntry) stats.TrafficEntry {
+	for _, e := range traffic {
+		return e
+	}
+	return stats.TrafficEntry{}
+}
+
+func tcpEcho(t *testing.T) M.Socksaddr {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}()
+		}
+	}()
+	return M.SocksaddrFromNet(l.Addr())
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"anytls/acl"
 	"anytls/proxy"
+	"anytls/proxy/session"
 	"anytls/resolver"
 	"anytls/stats"
 	"context"
@@ -68,7 +69,9 @@ func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksadd
 	return bufio.CopyConn(ctx, conn, c)
 }
 
-func proxyOutboundUoT(ctx context.Context, conn net.Conn, legacy bool, policy *outboundPolicy) error {
+// proxyOutboundUoT relays a UoT stream. A non-nil counter receives the UDP
+// payload bytes, the way hysteria counts UDP traffic.
+func proxyOutboundUoT(ctx context.Context, conn net.Conn, legacy bool, counter session.TrafficCounter, policy *outboundPolicy) error {
 	// Legacy v1 has no request header. Every packet carries its own address.
 	request := &uot.Request{}
 	if !legacy {
@@ -98,5 +101,11 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, legacy bool, policy *o
 		packetConn = newPolicyPacketConn(ctx, packetConn, policy)
 	}
 
-	return bufio.CopyPacketConn(ctx, uot.NewConn(conn, *request), packetConn)
+	uotConn := N.PacketConn(uot.NewConn(conn, *request))
+	if counter != nil {
+		uotConn = bufio.NewCounterPacketConn(uotConn,
+			[]N.CountFunc{func(n int64) { counter.AddTx(n) }},
+			[]N.CountFunc{func(n int64) { counter.AddRx(n) }})
+	}
+	return bufio.CopyPacketConn(ctx, uotConn, packetConn)
 }

@@ -63,8 +63,8 @@ type Session struct {
 	// server
 	onNewStream func(stream *Stream)
 
-	// Identity, when non-nil, receives Tx/Rx byte counts for every stream
-	// payload going through this session. Set once by the server after
+	// Identity, when non-nil, receives Tx/Rx byte counts from the streams
+	// that set Stream.CountIdentity. Set once by the server after
 	// authentication; read lock-free from the data path.
 	Identity TrafficCounter
 }

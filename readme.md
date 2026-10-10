@@ -180,7 +180,7 @@ bandwidth:
 
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
-| `/traffic` | GET | 返回各 `id` 的累计流量：`{"<id>": {"tx": N, "rx": N}}` |
+| `/traffic` | GET | 返回各 `id` 的累计流量：`{"<id>": {"tx": N, "rx": N}}`。与 hysteria 一致只计 payload：不含流开头的目标地址头，UDP（UoT）也不含每包的帧头 |
 | `/traffic?clear=<真值>` | GET | 返回清零前快照，随后重置计数（`clear` 用 `strconv.ParseBool` 解析，`1`/`t`/`true` 等均可） |
 | `/online` | GET | 返回各 `id` 当前在线设备数（按 `auth`+源IP 去重）：`{"<id>": N}` |
 | `/kick` | POST | 请求体为 `id` 数组 `["a","b"]`，断开这些 `id` 的所有会话，返回空 `200` |

@@ -98,7 +98,9 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		c = limiter.WrapConn(c, dev)
 	}
 
-	sess := session.NewServerSession(c, func(stream *session.Stream) {
+	// Declared first so the stream handler can reach sess.Identity.
+	var sess *session.Session
+	sess = session.NewServerSession(c, func(stream *session.Stream) {
 		defer func() {
 			if r := recover(); r != nil {
 				logrus.Errorln("[BUG]", r, string(debug.Stack()))
@@ -114,13 +116,15 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		}
 
 		if isUoT(destination) {
-			// Hysteria traces only TCP streams in /dump/streams. UDP traffic
-			// still counts per user through the session's Identity.
-			// proxyOutboundUoT clears the deadline once the UoT request is read.
-			proxyOutboundUoT(ctx, stream, destination.Fqdn == uot.LegacyMagicAddress, s.policy)
+			// Hysteria traces only TCP streams in /dump/streams and counts
+			// only the UDP payload in /traffic, so the UoT framing stays out
+			// of the user's traffic. proxyOutboundUoT clears the deadline once
+			// the UoT request is read.
+			proxyOutboundUoT(ctx, stream, destination.Fqdn == uot.LegacyMagicAddress, sess.Identity, s.policy)
 			return
 		}
 
+		stream.CountIdentity = true
 		var st *stats.StreamStats
 		if s.stats != nil {
 			st = s.stats.TraceStream(id, conn.ID(), conn.NextStreamID())
