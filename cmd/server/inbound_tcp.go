@@ -11,12 +11,12 @@ import (
 	"encoding/hex"
 	"net"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/uot"
 	"github.com/sirupsen/logrus"
 )
 
@@ -113,6 +113,14 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 			return
 		}
 
+		if isUoT(destination) {
+			// Hysteria traces only TCP streams in /dump/streams. UDP traffic
+			// still counts per user through the session's Identity.
+			// proxyOutboundUoT clears the deadline once the UoT request is read.
+			proxyOutboundUoT(ctx, stream, destination.Fqdn == uot.LegacyMagicAddress, s.policy)
+			return
+		}
+
 		var st *stats.StreamStats
 		if s.stats != nil {
 			st = s.stats.TraceStream(id, conn.ID(), conn.NextStreamID())
@@ -120,14 +128,8 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 			stream.Counter = st
 			defer s.stats.UntraceStream(st)
 		}
-
-		if strings.Contains(destination.String(), "udp-over-tcp.arpa") {
-			// proxyOutboundUoT clears the deadline once the UoT request is read.
-			proxyOutboundUoT(ctx, stream, destination, st, s.policy)
-		} else {
-			_ = stream.SetReadDeadline(time.Time{})
-			proxyOutboundTCP(ctx, stream, destination, st, s.policy)
-		}
+		_ = stream.SetReadDeadline(time.Time{})
+		proxyOutboundTCP(ctx, stream, destination, st, s.policy)
 	}, &padding.DefaultPaddingFactory)
 
 	if s.stats != nil {
@@ -138,6 +140,12 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 
 	sess.Run()
 	sess.Close()
+}
+
+// isUoT reports whether a stream's target is a sing UoT magic address (v2 or
+// legacy v1) rather than a real TCP destination.
+func isUoT(destination M.Socksaddr) bool {
+	return destination.Fqdn == uot.MagicAddress || destination.Fqdn == uot.LegacyMagicAddress
 }
 
 func fallback(ctx context.Context, c net.Conn) {

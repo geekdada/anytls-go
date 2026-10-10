@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -12,7 +13,11 @@ import (
 
 	"anytls/auth"
 	"anytls/proxy/padding"
+	"anytls/stats"
 	"anytls/util"
+
+	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/uot"
 )
 
 func shortenTimeouts(t *testing.T, d time.Duration) {
@@ -94,4 +99,113 @@ func frameBytes(cmd byte, sid uint32, data []byte) []byte {
 	binary.BigEndian.PutUint16(b[5:7], uint16(len(data)))
 	copy(b[7:], data)
 	return b
+}
+
+func TestUoTStreamIsNotTraced(t *testing.T) {
+	for _, version := range []uint8{uot.Version, uot.LegacyVersion} {
+		t.Run(uot.RequestDestination(version).Fqdn, func(t *testing.T) {
+			registry := stats.NewRegistry()
+			conn := openStream(t, registry, uot.RequestDestination(version), uotBody(t, version, udpEcho(t)))
+			if got := readPSH(t, conn, 1); len(got) == 0 {
+				t.Fatal("no echoed UoT packet")
+			}
+
+			// hysteria traces only TCP streams, so UDP must not show in /dump/streams.
+			if rows := registry.DumpStreams(); len(rows) != 0 {
+				t.Fatalf("DumpStreams = %+v, want none", rows)
+			}
+		})
+	}
+}
+
+// openStream authenticates to a server that reports to registry and allows
+// private targets, opens stream 1 to target and sends body on it.
+func openStream(t *testing.T, registry *stats.Registry, target M.Socksaddr, body []byte) net.Conn {
+	t.Helper()
+	s := testServer(t, "pw")
+	s.stats = registry
+	s.policy = newOutboundPolicy(nil, nil, false)
+	clientConn, _ := serve(t, s)
+	conn := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true})
+
+	var payload bytes.Buffer
+	if err := M.SocksaddrSerializer.WriteAddrPort(&payload, target); err != nil {
+		t.Fatal(err)
+	}
+	payload.Write(body)
+	sum := sha256.Sum256([]byte("pw"))
+	settings := []byte("v=2\npadding-md5=" + padding.DefaultPaddingFactory.Load().Md5)
+	frames := [][]byte{
+		append(sum[:], 0, 0),
+		frameBytes(4, 0, settings),        // cmdSettings
+		frameBytes(1, 1, nil),             // cmdSYN
+		frameBytes(2, 1, payload.Bytes()), // cmdPSH
+	}
+	// net.Pipe is unbuffered and a v2 server writes its settings frame while
+	// the client is still writing.
+	go func() {
+		for _, b := range frames {
+			if _, err := conn.Write(b); err != nil {
+				return
+			}
+		}
+	}()
+	return conn
+}
+
+// uotBody is a UoT stream body of the given version carrying one "ping"
+// packet to target.
+func uotBody(t *testing.T, version uint8, target M.Socksaddr) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	if version == uot.Version {
+		if err := uot.WriteRequest(&body, uot.Request{Destination: target}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := uot.AddrParser.WriteAddrPort(&body, target); err != nil {
+		t.Fatal(err)
+	}
+	_ = binary.Write(&body, binary.BigEndian, uint16(4))
+	body.WriteString("ping")
+	return body.Bytes()
+}
+
+// readPSH returns the data of the first PSH frame on sid, skipping control frames.
+func readPSH(t *testing.T, conn net.Conn, sid uint32) []byte {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		var hdr [7]byte
+		if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+			t.Fatalf("waiting for PSH: %v", err)
+		}
+		data := make([]byte, binary.BigEndian.Uint16(hdr[5:7]))
+		if _, err := io.ReadFull(conn, data); err != nil {
+			t.Fatalf("reading frame data: %v", err)
+		}
+		if hdr[0] == 2 && binary.BigEndian.Uint32(hdr[1:5]) == sid {
+			return data
+		}
+	}
+}
+
+func udpEcho(t *testing.T) M.Socksaddr {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		b := make([]byte, 2048)
+		for {
+			n, addr, err := pc.ReadFrom(b)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo(b[:n], addr)
+		}
+	}()
+	return M.SocksaddrFromNet(pc.LocalAddr())
 }

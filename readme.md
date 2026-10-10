@@ -184,7 +184,7 @@ bandwidth:
 | `/traffic?clear=<真值>` | GET | 返回清零前快照，随后重置计数（`clear` 用 `strconv.ParseBool` 解析，`1`/`t`/`true` 等均可） |
 | `/online` | GET | 返回各 `id` 当前在线设备数（按 `auth`+源IP 去重）：`{"<id>": N}` |
 | `/kick` | POST | 请求体为 `id` 数组 `["a","b"]`，断开这些 `id` 的所有会话，返回空 `200` |
-| `/dump/streams` | GET | 返回当前所有活动流；默认 JSON `{"streams":[...]}`，`Accept: text/plain` 时返回 netstat 风格表格 |
+| `/dump/streams` | GET | 返回当前所有活动 TCP 流（与 hysteria 一致，UDP/UoT 不在其中，只计入 `/traffic`）；默认 JSON `{"streams":[...]}`，`Accept: text/plain` 时返回 netstat 风格表格 |
 
 `/dump/streams` 的每条记录字段与 hysteria 2 完全一致：`state`、`auth`、`connection`、`stream`、`req_addr`、`hooked_req_addr`、`tx`、`rx`、`initial_at`、`last_active_at`（时间为 RFC3339Nano）。其中 `hooked_req_addr` 目前恒为空（ACL 劫持改写未回填到统计），这与 hysteria 在未命中改写规则时的输出相同。
 

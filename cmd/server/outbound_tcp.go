@@ -68,11 +68,16 @@ func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksadd
 	return bufio.CopyConn(ctx, conn, c)
 }
 
-func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, policy *outboundPolicy) error {
-	request, err := uot.ReadRequest(conn)
-	if err != nil {
-		logrus.Debugln("proxyOutboundUoT ReadRequest:", err)
-		return err
+func proxyOutboundUoT(ctx context.Context, conn net.Conn, legacy bool, policy *outboundPolicy) error {
+	// Legacy v1 has no request header. Every packet carries its own address.
+	request := &uot.Request{}
+	if !legacy {
+		var err error
+		request, err = uot.ReadRequest(conn)
+		if err != nil {
+			logrus.Debugln("proxyOutboundUoT ReadRequest:", err)
+			return err
+		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
@@ -86,9 +91,6 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksadd
 	err = N.ReportHandshakeSuccess(conn)
 	if err != nil {
 		return err
-	}
-	if st != nil {
-		st.SetState(stats.StreamStateEstablished)
 	}
 
 	packetConn := N.PacketConn(bufio.NewPacketConn(c))
