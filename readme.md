@@ -217,7 +217,7 @@ bandwidth:
 
 ### 出站（outbounds）
 
-`outbounds` 定义具名出站，ACL 规则按名称引用。支持 `direct`（直连）与 `socks5` 两种类型，类型不区分大小写。`default` 是列表中的第一项，除非用户条目也命名为 `default`；未配置 ACL 时所有流量都走 `default`，未配置 `outbounds` 时 `default` 等同 `direct`。用户条目可以覆盖内置名称 `direct`、`reject`、`default`。
+`outbounds` 定义具名出站，ACL 规则按名称引用。支持 `direct`（直连）与 `socks5` 两种类型，类型不区分大小写。`default` 是列表中的第一项，除非用户条目也命名为 `default`；未配置 ACL 时所有流量都走 `default`，未配置 `outbounds` 时 `default` 等同 `direct`。用户条目可以覆盖内置名称 `direct`、`reject`、`default`。ACL 规则只能引用由字母、数字和下划线组成的名称，名称含 `-` 等字符的出站只能作为 `default` 使用。
 
 - `socks5` 需要 `addr`，`username` 与 `password` 同时设置或同时省略。SOCKS5 出站接收域名并自行解析；本地解析结果只用于 ACL 匹配与私网检查，不用于拨号。
 - `outbound.allowPrivate: false` 时，域名仍会先在本地解析并检查是否属于内网，本地解析不出的域名会被拒绝。
