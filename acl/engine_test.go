@@ -3,6 +3,7 @@ package acl
 import (
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,21 @@ func TestNewEngineFromStringSyntaxError(t *testing.T) {
 	_, err := NewEngineFromString("not a rule\n", testOutbounds, &FileGeoLoader{})
 	if err == nil {
 		t.Error("expected syntax error, got nil")
+	}
+}
+
+func TestNewEngineFromStringRequiresDefault(t *testing.T) {
+	outbounds := map[string]testAction{"direct": ActionDirect, "reject": ActionReject}
+	_, err := NewEngineFromString("direct(all)\n", outbounds, &FileGeoLoader{})
+	if err == nil || !strings.Contains(err.Error(), `no "default" outbound`) {
+		t.Fatalf("err = %v, want a missing default error", err)
+	}
+}
+
+func TestNewEngineFromStringRejectsNilDefault(t *testing.T) {
+	outbounds := map[string]any{"direct": ActionDirect, "default": nil}
+	_, err := NewEngineFromString("direct(all)\n", outbounds, &FileGeoLoader{})
+	if err == nil || !strings.Contains(err.Error(), `no "default" outbound`) {
+		t.Fatalf("err = %v, want a missing default error", err)
 	}
 }

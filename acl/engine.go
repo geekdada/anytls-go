@@ -1,6 +1,7 @@
 package acl
 
 import (
+	"errors"
 	"net"
 	"os"
 )
@@ -17,7 +18,13 @@ type Engine[O any] struct {
 	Default O
 }
 
+// NewEngineFromString fails without a non-nil "default" outbound. A nil
+// Default would only surface as a panic on the first unmatched request, and on
+// the UoT path that panic runs in a goroutine with no recover.
 func NewEngineFromString[O any](rules string, outbounds map[string]O, geoLoader GeoLoader) (*Engine[O], error) {
+	if ob, ok := outbounds["default"]; !ok || any(ob) == nil {
+		return nil, errors.New(`acl: no "default" outbound`)
+	}
 	trs, err := ParseTextRules(rules)
 	if err != nil {
 		return nil, err
