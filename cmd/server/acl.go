@@ -256,6 +256,7 @@ func (c *routedPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) e
 	if c.conn == nil {
 		conn, err := d.route.outbound.ListenUDP(c.ctx)
 		if err != nil {
+			logrus.Debugln("routedPacketConn ListenUDP:", err)
 			c.mu.Unlock()
 			b.Release()
 			return err
