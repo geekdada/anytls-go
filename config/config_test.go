@@ -770,6 +770,16 @@ func TestLoadFileOutboundsValidation(t *testing.T) {
 			wantErr: "outbounds[0].name: empty outbound name",
 		},
 		{
+			name:    "blank name",
+			body:    "outbounds:\n  - name: \"  \"\n    type: direct\n",
+			wantErr: "outbounds[0].name: empty outbound name",
+		},
+		{
+			name:    "name with surrounding whitespace",
+			body:    "outbounds:\n  - name: \" warp\"\n    type: direct\n",
+			wantErr: `outbounds[0].name " warp": surrounding whitespace is not allowed`,
+		},
+		{
 			name:    "duplicate name",
 			body:    "outbounds:\n  - name: a\n    type: direct\n  - name: A\n    type: direct\n",
 			wantErr: `outbounds[1].name: duplicate outbound name "A"`,
@@ -788,6 +798,26 @@ func TestLoadFileOutboundsValidation(t *testing.T) {
 			name:    "socks5 addr without port",
 			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: 127.0.0.1\n",
 			wantErr: "outbounds[0].socks5.addr",
+		},
+		{
+			name:    "socks5 addr without host",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: \":1080\"\n",
+			wantErr: `outbounds[0].socks5.addr ":1080": empty host`,
+		},
+		{
+			name:    "socks5 addr with named port",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: host:abc\n",
+			wantErr: `outbounds[0].socks5.addr "host:abc": port must be a number from 1 to 65535`,
+		},
+		{
+			name:    "socks5 addr with port out of range",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: host:99999\n",
+			wantErr: `outbounds[0].socks5.addr "host:99999": port must be a number from 1 to 65535`,
+		},
+		{
+			name:    "socks5 addr with port zero",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: host:0\n",
+			wantErr: `outbounds[0].socks5.addr "host:0": port must be a number from 1 to 65535`,
 		},
 		{
 			name:    "username without password",

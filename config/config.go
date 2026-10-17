@@ -404,8 +404,8 @@ func (c *Config) ValidateOutbounds() error {
 	seen := make(map[string]struct{}, len(c.Outbounds))
 	for i := range c.Outbounds {
 		e := &c.Outbounds[i]
-		if e.Name == "" {
-			return fmt.Errorf("outbounds[%d].name: empty outbound name", i)
+		if err := validateOutboundName(i, e.Name); err != nil {
+			return err
 		}
 		key := strings.ToLower(e.Name)
 		if _, ok := seen[key]; ok {
@@ -428,12 +428,34 @@ func (c *Config) ValidateOutbounds() error {
 	return nil
 }
 
+// validateOutboundName rejects blank names and names with surrounding
+// whitespace. An ACL rule target is a run of word characters, so a rule could
+// never reference " warp".
+func validateOutboundName(index int, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("outbounds[%d].name: empty outbound name", index)
+	}
+	if strings.TrimSpace(name) != name {
+		return fmt.Errorf("outbounds[%d].name %q: surrounding whitespace is not allowed", index, name)
+	}
+	return nil
+}
+
 func (s *OutboundSOCKS5Config) validate(index int) error {
 	if s.Addr == "" {
 		return fmt.Errorf("outbounds[%d].socks5.addr: empty socks5 address", index)
 	}
-	if _, _, err := net.SplitHostPort(s.Addr); err != nil {
+	host, port, err := net.SplitHostPort(s.Addr)
+	if err != nil {
 		return fmt.Errorf("outbounds[%d].socks5.addr %q: %w", index, s.Addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("outbounds[%d].socks5.addr %q: empty host", index, s.Addr)
+	}
+	// A service name such as "socks" would pass the dialer, but a proxy
+	// address is expected to carry an explicit port.
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+		return fmt.Errorf("outbounds[%d].socks5.addr %q: port must be a number from 1 to 65535", index, s.Addr)
 	}
 	if (s.Username == "") != (s.Password == "") {
 		return fmt.Errorf("outbounds[%d].socks5: username and password must both be set or both be omitted", index)
