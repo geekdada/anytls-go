@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"strings"
 
 	"anytls/config"
 	"anytls/outbound"
+
+	"github.com/sirupsen/logrus"
 )
 
 // newOutbounds builds the named outbound map from the outbounds config. Only
@@ -24,6 +28,31 @@ func newOutbounds(entries []config.OutboundEntry) (map[string]outbound.Outbound,
 		}
 	}
 	return outboundMap(list, outbound.NewDirect()), nil
+}
+
+// warnLocalProxies warns about SOCKS5 proxies on a loopback or private
+// address. The private filter only checks what the server resolved, and such a
+// proxy resolves domains itself and can reach its own network.
+func warnLocalProxies(entries []config.OutboundEntry) {
+	for _, entry := range entries {
+		if entry.Kind() == "socks5" && isLocalProxyAddr(entry.SOCKS5.Addr) {
+			logrus.Warnf("[Outbound] %s: socks5 proxy %s is on a private address and resolves domains itself; restrict private destinations on the proxy", entry.Name, entry.SOCKS5.Addr)
+		}
+	}
+}
+
+// isLocalProxyAddr reports whether addr names localhost or a non-public IP.
+// Other host names are not resolved, so they are never reported.
+func isLocalProxyAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && isPrivateAddr(ip)
 }
 
 // namedOutbound pairs an outbound with its configured name.

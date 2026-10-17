@@ -231,3 +231,21 @@ func TestProxyOutboundTCPDialsRouteTarget(t *testing.T) {
 		t.Fatalf("dialed = %v, want [example.com:443]", stub.dialed)
 	}
 }
+
+func TestIsLocalProxyAddr(t *testing.T) {
+	tests := map[string]bool{
+		"127.0.0.1:40000":    true,
+		"[::1]:1080":         true,
+		"10.0.0.5:1080":      true,
+		"localhost:1080":     true,
+		"LocalHost:1080":     true,
+		"203.0.113.9:1080":   false,
+		"proxy.example:1080": false,
+		"not-an-addr":        false,
+	}
+	for addr, want := range tests {
+		if got := isLocalProxyAddr(addr); got != want {
+			t.Errorf("isLocalProxyAddr(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}

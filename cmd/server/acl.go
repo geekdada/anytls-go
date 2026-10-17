@@ -119,7 +119,9 @@ func ipToNetip(ip net.IP) netip.Addr {
 // when resolution ran but yielded nothing and the outbound cannot resolve the
 // name itself (or the private filter is on), or errPrivateDestination when the
 // private filter is on and the address to dial is not public. A hijack address
-// is exempt from the filter because the operator chose it.
+// is exempt from the filter because the operator chose it. For a
+// remote-resolving outbound the filter checks every resolved family, not only
+// the address it would have dialed.
 //
 // The order matters and mirrors hysteria's Resolver(ACL(outbound)) chain:
 // resolution failure is not fatal until after the ACL has had its say, so
@@ -147,13 +149,27 @@ func (p *outboundPolicy) selectRoute(ctx context.Context, destination M.Socksadd
 		}
 		return route{ob, destination}, nil
 	}
-	if p.blockPrivate && addr.IsIP() && isPrivateAddr(addr.Addr) {
+	if p.blockPrivate && reachesPrivate(ob, addr, result) {
 		return route{}, errPrivateDestination
 	}
 	if ob.RemoteResolve() {
 		return route{ob, destination}, nil
 	}
 	return route{ob, addr}, nil
+}
+
+// reachesPrivate reports whether ob may connect to a non-public address. A
+// remote-resolving outbound looks the name up again and may use either family,
+// so both resolved records are checked. Other outbounds dial addr itself.
+func reachesPrivate(ob outbound.Outbound, addr M.Socksaddr, result resolver.Result) bool {
+	if ob.RemoteResolve() {
+		return isPrivateIP(result.IPv4) || isPrivateIP(result.IPv6)
+	}
+	return addr.IsIP() && isPrivateAddr(addr.Addr)
+}
+
+func isPrivateIP(ip net.IP) bool {
+	return ip != nil && isPrivateAddr(ipToNetip(ip))
 }
 
 // pickDialAddr prefers the resolved IPv4 address, then IPv6, and keeps the

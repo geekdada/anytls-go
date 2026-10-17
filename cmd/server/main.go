@@ -205,6 +205,8 @@ func main() {
 
 	if cfg.Outbound.AllowPrivate {
 		logrus.Warnln("[Outbound] private destinations allowed: clients can reach the server's loopback and LAN")
+	} else {
+		warnLocalProxies(cfg.Outbounds)
 	}
 	policy := newOutboundPolicy(aclEngine, dnsResolver, !cfg.Outbound.AllowPrivate, obs["default"])
 	server := NewMyServer(tlsConfig, authn, registry, limits, policy)

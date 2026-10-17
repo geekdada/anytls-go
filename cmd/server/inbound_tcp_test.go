@@ -16,6 +16,7 @@ import (
 	"anytls/outbound"
 	"anytls/outbound/outboundtest"
 	"anytls/proxy/padding"
+	"anytls/resolver"
 	"anytls/stats"
 	"anytls/util"
 
@@ -120,6 +121,24 @@ func TestUoTThroughSOCKS5(t *testing.T) {
 	}
 	if got := srv.PacketDestinations(); !slices.Contains(got, echo.String()) {
 		t.Fatalf("packet destinations = %v, want to contain %s", got, echo)
+	}
+}
+
+func TestTCPThroughLoopbackSOCKS5WithPrivateFilter(t *testing.T) {
+	// The private filter checks destinations, not the proxy's own address,
+	// so a SOCKS5 proxy on loopback still works with the filter on. The stub
+	// resolver gives a public answer, and the proxy resolves localhost itself.
+	srv := outboundtest.NewSOCKS5Server(t, "u", "p")
+	target := M.ParseSocksaddrHostPort("localhost", tcpEcho(t).Port)
+	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
+	conn := openStream(t, stats.NewRegistry(), target, []byte("ping"),
+		newOutboundPolicy(nil, res, true, outbound.NewSOCKS5(srv.Addr, "u", "p")))
+
+	if got := readPSH(t, conn, 1); string(got) != "ping" {
+		t.Fatalf("echo = %q, want ping", got)
+	}
+	if got := srv.ConnectDestinations(); !slices.Equal(got, []string{target.String()}) {
+		t.Fatalf("connect destinations = %v, want [%s]", got, target)
 	}
 }
 

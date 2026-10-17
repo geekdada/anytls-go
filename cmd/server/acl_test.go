@@ -362,6 +362,12 @@ func TestRoutedPacketConnCloseUnblocksRead(t *testing.T) {
 		done <- err
 	}()
 
+	// Without this check the test would pass even if ReadPacket never blocked.
+	select {
+	case err := <-done:
+		t.Fatalf("ReadPacket returned %v before Close", err)
+	case <-time.After(50 * time.Millisecond):
+	}
 	c.Close()
 	select {
 	case err := <-done:
@@ -370,5 +376,28 @@ func TestRoutedPacketConnCloseUnblocksRead(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ReadPacket still blocked after Close")
+	}
+}
+
+func TestPolicyRouteRemoteChecksBothFamilies(t *testing.T) {
+	// The proxy resolves the name again and may use the AAAA record, so a
+	// private IPv6 answer must block the request even with a public IPv4 one.
+	res := &stubResolver{result: resolver.Result{
+		IPv4: net.IPv4(1, 2, 3, 4).To4(),
+		IPv6: net.ParseIP("::1"),
+	}}
+	remote := &stubOutbound{remote: true}
+	_, err := newOutboundPolicy(nil, res, true, remote).selectRoute(context.Background(), M.ParseSocksaddr("example.com:443"), acl.ProtocolTCP)
+	if !errors.Is(err, errPrivateDestination) {
+		t.Fatalf("remote outbound: err = %v, want errPrivateDestination", err)
+	}
+
+	direct := &stubOutbound{}
+	r, err := newOutboundPolicy(nil, res, true, direct).selectRoute(context.Background(), M.ParseSocksaddr("example.com:443"), acl.ProtocolTCP)
+	if err != nil {
+		t.Fatalf("direct outbound: err = %v, want the IPv4 route", err)
+	}
+	if r.outbound != direct || r.target.String() != "1.2.3.4:443" {
+		t.Fatalf("route = (%v, %s), want (direct, 1.2.3.4:443)", r.outbound, r.target)
 	}
 }
