@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
+	"time"
 
 	"anytls/acl"
 	"anytls/outbound"
@@ -108,11 +110,16 @@ func ipToNetip(ip net.IP) netip.Addr {
 // selectRoute applies the policy to one destination and returns the outbound to
 // use and the address to give it: the hijack IP when the matched rule carries
 // one, the resolved IP (so the connection goes to the IP that was matched), or
-// the original destination for a remote-resolving outbound. It returns
-// errACLRejected when a rule rejects the request, or a resolver.Error when
-// resolution ran but yielded nothing, or errPrivateDestination when the private
-// filter is on and the address to dial is not public. A hijack address is
-// exempt from the filter because the operator chose it.
+// the original destination when no resolution was attempted or the outbound
+// resolves names itself. A remote-resolving outbound also keeps the original
+// destination when local resolution fails, unless the private filter needs the
+// resolved address.
+//
+// It returns errACLRejected when a rule rejects the request, or a resolver.Error
+// when resolution ran but yielded nothing and the outbound cannot resolve the
+// name itself (or the private filter is on), or errPrivateDestination when the
+// private filter is on and the address to dial is not public. A hijack address
+// is exempt from the filter because the operator chose it.
 //
 // The order matters and mirrors hysteria's Resolver(ACL(outbound)) chain:
 // resolution failure is not fatal until after the ACL has had its say, so
@@ -169,45 +176,59 @@ func pickDialAddr(destination M.Socksaddr, result resolver.Result, attempted boo
 
 type policyDecision struct {
 	rejected bool
-	dest     M.Socksaddr
+	route    route
 }
 
-// policyPacketConn wraps a UDP socket with per-packet policy checks for
-// udp-over-tcp: ACL matching and, when a custom resolver is configured,
-// resolution of domain destinations. Rejected packets are dropped silently
-// (mirroring hysteria, which ignores per-packet Feed errors), and so are packets
-// whose destination cannot be resolved: returning an error here would tear down
-// the whole stream inside bufio.CopyPacketConn, taking every other destination
-// it multiplexes with it. Decisions are cached per destination for the life of
-// the stream.
-type policyPacketConn struct {
-	N.PacketConn
+// routedPacketConn applies the policy per packet for udp-over-tcp and sends the
+// allowed packets through the outbound the ACL picked. The outbound socket is
+// opened lazily on the first allowed packet, so a stream that only carries
+// rejected or unresolvable traffic never opens one. That socket then serves the
+// whole stream: packets the ACL routes to a different outbound are dropped,
+// which differs from hysteria on purpose, because there a stream can otherwise
+// leave through an egress its ACL decision did not choose.
+//
+// Rejected packets are dropped silently (mirroring hysteria, which ignores
+// per-packet Feed errors), and so are packets whose destination cannot be
+// resolved: returning an error here would tear down the whole stream inside
+// bufio.CopyPacketConn, taking every other destination it multiplexes with it.
+// A ListenUDP failure is the exception; it ends the stream, as it does in
+// hysteria. Decisions are cached per destination for the life of the stream.
+type routedPacketConn struct {
 	ctx    context.Context
 	policy *outboundPolicy
 	cache  map[string]policyDecision
+
+	// mu guards the lazily opened socket, which Close may race against.
+	mu       sync.Mutex
+	outbound outbound.Outbound
+	conn     N.PacketConn
+	closed   bool
+	// ready is closed once conn is set or the stream is closed, so a blocked
+	// ReadPacket returns even if no packet is ever allowed.
+	ready chan struct{}
 }
 
-func newPolicyPacketConn(ctx context.Context, conn N.PacketConn, p *outboundPolicy) N.PacketConn {
-	return &policyPacketConn{
-		PacketConn: conn,
-		ctx:        ctx,
-		policy:     p,
-		cache:      make(map[string]policyDecision),
+func newRoutedPacketConn(ctx context.Context, p *outboundPolicy) *routedPacketConn {
+	return &routedPacketConn{
+		ctx:    ctx,
+		policy: p,
+		cache:  make(map[string]policyDecision),
+		ready:  make(chan struct{}),
 	}
 }
 
-func (c *policyPacketConn) decide(destination M.Socksaddr) policyDecision {
+func (c *routedPacketConn) decide(destination M.Socksaddr) policyDecision {
 	r, err := c.policy.selectRoute(c.ctx, destination, acl.ProtocolUDP)
 	if err != nil {
 		if !errors.Is(err, errACLRejected) && !errors.Is(err, errPrivateDestination) {
-			logrus.Debugln("policyPacketConn drop:", destination, err)
+			logrus.Debugln("routedPacketConn drop:", destination, err)
 		}
 		return policyDecision{rejected: true}
 	}
-	return policyDecision{dest: r.target}
+	return policyDecision{route: r}
 }
 
-func (c *policyPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) error {
+func (c *routedPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) error {
 	key := destination.String()
 	d, ok := c.cache[key]
 	if !ok {
@@ -225,5 +246,104 @@ func (c *policyPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) e
 		b.Release()
 		return nil
 	}
-	return c.PacketConn.WritePacket(b, d.dest)
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		b.Release()
+		return net.ErrClosed
+	}
+	if c.conn == nil {
+		conn, err := d.route.outbound.ListenUDP(c.ctx)
+		if err != nil {
+			c.mu.Unlock()
+			b.Release()
+			return err
+		}
+		c.outbound = d.route.outbound
+		c.conn = conn
+		close(c.ready)
+	}
+	conn := c.conn
+	bound := c.outbound
+	c.mu.Unlock()
+
+	if d.route.outbound != bound {
+		b.Release()
+		logrus.Debugln("routedPacketConn drop:", destination, "belongs to another outbound")
+		return nil
+	}
+	return conn.WritePacket(b, d.route.target)
+}
+
+func (c *routedPacketConn) ReadPacket(b *buf.Buffer) (M.Socksaddr, error) {
+	<-c.ready
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return M.Socksaddr{}, net.ErrClosed
+	}
+	return conn.ReadPacket(b)
+}
+
+// Close is idempotent. It also releases a ReadPacket blocked on the lazy open.
+func (c *routedPacketConn) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	select {
+	case <-c.ready:
+	default:
+		close(c.ready)
+	}
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		return conn.Close()
+	}
+	return nil
+}
+
+// FrontHeadroom leaves room for a SOCKS5 UDP header, which a remote outbound
+// writes in place.
+func (c *routedPacketConn) FrontHeadroom() int {
+	return 3 + M.MaxSocksaddrLength
+}
+
+func (c *routedPacketConn) currentConn() N.PacketConn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn
+}
+
+func (c *routedPacketConn) LocalAddr() net.Addr {
+	if conn := c.currentConn(); conn != nil {
+		return conn.LocalAddr()
+	}
+	return &net.UDPAddr{}
+}
+
+func (c *routedPacketConn) SetDeadline(t time.Time) error {
+	if conn := c.currentConn(); conn != nil {
+		return conn.SetDeadline(t)
+	}
+	return nil
+}
+
+func (c *routedPacketConn) SetReadDeadline(t time.Time) error {
+	if conn := c.currentConn(); conn != nil {
+		return conn.SetReadDeadline(t)
+	}
+	return nil
+}
+
+func (c *routedPacketConn) SetWriteDeadline(t time.Time) error {
+	if conn := c.currentConn(); conn != nil {
+		return conn.SetWriteDeadline(t)
+	}
+	return nil
 }

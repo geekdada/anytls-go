@@ -228,15 +228,10 @@ func writeTestPacket(t *testing.T, c N.PacketConn, addr string) {
 	}
 }
 
-func newTestPacketConn(t *testing.T, p *outboundPolicy) (*stubPacketConn, *policyPacketConn) {
-	t.Helper()
-	stub := &stubPacketConn{}
-	return stub, newPolicyPacketConn(context.Background(), stub, p).(*policyPacketConn)
-}
-
-func TestPolicyPacketConnRejectDrops(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "reject(all, udp/443)\nreject(10.0.0.0/8)\ndirect(all)\n"), nil, false, nil)
-	stub, c := newTestPacketConn(t, p)
+func TestRoutedPacketConnRejectDrops(t *testing.T) {
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	p := newOutboundPolicy(testEngineWith(t, "reject(all, udp/443)\nreject(10.0.0.0/8)\ndirect(all)\n", outboundMap(nil, direct)), nil, false, direct)
+	c := newRoutedPacketConn(context.Background(), p)
 
 	writeTestPacket(t, c, "8.8.8.8:443") // rejected by proto/port
 	writeTestPacket(t, c, "10.1.2.3:53") // rejected by CIDR
@@ -244,47 +239,136 @@ func TestPolicyPacketConnRejectDrops(t *testing.T) {
 	writeTestPacket(t, c, "10.1.2.3:53") // rejected, cache hit this time
 	writeTestPacket(t, c, "1.1.1.1:853") // allowed
 
-	if len(stub.written) != 2 || stub.written[0] != "8.8.8.8:53" || stub.written[1] != "1.1.1.1:853" {
-		t.Fatalf("written = %v, want [8.8.8.8:53 1.1.1.1:853]", stub.written)
+	if len(direct.packets.written) != 2 || direct.packets.written[0] != "8.8.8.8:53" || direct.packets.written[1] != "1.1.1.1:853" {
+		t.Fatalf("written = %v, want [8.8.8.8:53 1.1.1.1:853]", direct.packets.written)
 	}
 	if len(c.cache) != 4 {
 		t.Fatalf("cache entries = %d, want 4", len(c.cache))
 	}
 }
 
-func TestPolicyPacketConnHijackRewrites(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8, udp/53, 1.1.1.1)\ndirect(all)\n"), nil, false, nil)
-	stub, c := newTestPacketConn(t, p)
+func TestRoutedPacketConnHijackRewrites(t *testing.T) {
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	p := newOutboundPolicy(testEngineWith(t, "direct(8.8.8.8, udp/53, 1.1.1.1)\ndirect(all)\n", outboundMap(nil, direct)), nil, false, direct)
+	c := newRoutedPacketConn(context.Background(), p)
 
 	writeTestPacket(t, c, "8.8.8.8:53")
-	if len(stub.written) != 1 || stub.written[0] != "1.1.1.1:53" {
-		t.Fatalf("written = %v, want [1.1.1.1:53]", stub.written)
+	if len(direct.packets.written) != 1 || direct.packets.written[0] != "1.1.1.1:53" {
+		t.Fatalf("written = %v, want [1.1.1.1:53]", direct.packets.written)
 	}
 }
 
-func TestPolicyPacketConnResolvesAndCaches(t *testing.T) {
+func TestRoutedPacketConnResolvesAndCaches(t *testing.T) {
 	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
-	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res, false, nil))
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	c := newRoutedPacketConn(context.Background(), newOutboundPolicy(nil, res, false, direct))
 
 	writeTestPacket(t, c, "example.com:53")
 	writeTestPacket(t, c, "example.com:53")
 
-	if len(stub.written) != 2 || stub.written[0] != "1.2.3.4:53" || stub.written[1] != "1.2.3.4:53" {
-		t.Fatalf("written = %v, want two 1.2.3.4:53 packets", stub.written)
+	if len(direct.packets.written) != 2 || direct.packets.written[0] != "1.2.3.4:53" || direct.packets.written[1] != "1.2.3.4:53" {
+		t.Fatalf("written = %v, want two 1.2.3.4:53 packets", direct.packets.written)
 	}
 	if res.callCount() != 1 {
 		t.Fatalf("resolver calls = %d, want 1 (decision cached per destination)", res.callCount())
 	}
 }
 
-func TestPolicyPacketConnDropsOnResolveFailure(t *testing.T) {
+func TestRoutedPacketConnDropsOnResolveFailure(t *testing.T) {
 	// A resolve failure drops the packet but keeps the stream alive: it
 	// multiplexes other destinations that may resolve fine.
 	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
-	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res, false, nil))
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	c := newRoutedPacketConn(context.Background(), newOutboundPolicy(nil, res, false, direct))
 
 	writeTestPacket(t, c, "example.com:53")
-	if len(stub.written) != 0 {
-		t.Fatalf("written = %v, want the packet dropped", stub.written)
+	if len(direct.packets.written) != 0 {
+		t.Fatalf("written = %v, want the packet dropped", direct.packets.written)
+	}
+	if direct.listens != 0 {
+		t.Fatalf("listens = %d, want 0 for a stream with no allowed packet", direct.listens)
+	}
+}
+
+func TestRoutedPacketConnOpensOnFirstAllowedPacket(t *testing.T) {
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	p := newOutboundPolicy(testEngineWith(t, "reject(10.0.0.0/8)\ndirect(all)\n", outboundMap(nil, direct)), nil, false, direct)
+	c := newRoutedPacketConn(context.Background(), p)
+
+	writeTestPacket(t, c, "10.1.2.3:53")
+	if direct.listens != 0 {
+		t.Fatalf("listens = %d after a rejected packet, want 0", direct.listens)
+	}
+
+	writeTestPacket(t, c, "8.8.8.8:53")
+	writeTestPacket(t, c, "1.1.1.1:53")
+	if direct.listens != 1 {
+		t.Fatalf("listens = %d, want 1", direct.listens)
+	}
+	if len(direct.packets.written) != 2 || direct.packets.written[0] != "8.8.8.8:53" || direct.packets.written[1] != "1.1.1.1:53" {
+		t.Fatalf("written = %v, want [8.8.8.8:53 1.1.1.1:53]", direct.packets.written)
+	}
+}
+
+func TestRoutedPacketConnBindsFirstOutbound(t *testing.T) {
+	warp := &stubOutbound{remote: true, packets: &stubPacketConn{}}
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	p := newOutboundPolicy(testEngineWith(t, "warp(1.1.1.1)\ndirect(all)\n", outboundMap([]namedOutbound{{"warp", warp}}, direct)), nil, false, direct)
+	c := newRoutedPacketConn(context.Background(), p)
+
+	writeTestPacket(t, c, "8.8.8.8:53")
+	writeTestPacket(t, c, "1.1.1.1:53")
+
+	if len(direct.packets.written) != 1 || direct.packets.written[0] != "8.8.8.8:53" {
+		t.Fatalf("direct written = %v, want [8.8.8.8:53]", direct.packets.written)
+	}
+	if warp.listens != 0 {
+		t.Fatalf("warp listens = %d, want 0: packets for another outbound are dropped", warp.listens)
+	}
+}
+
+func TestRoutedPacketConnRemoteKeepsDomain(t *testing.T) {
+	warp := &stubOutbound{remote: true, packets: &stubPacketConn{}}
+	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
+	c := newRoutedPacketConn(context.Background(), newOutboundPolicy(nil, res, false, warp))
+
+	writeTestPacket(t, c, "example.com:53")
+	if len(warp.packets.written) != 1 || warp.packets.written[0] != "example.com:53" {
+		t.Fatalf("written = %v, want [example.com:53]", warp.packets.written)
+	}
+}
+
+func TestRoutedPacketConnListenErrorEndsStream(t *testing.T) {
+	direct := &stubOutbound{listenErr: errors.New("boom")}
+	c := newRoutedPacketConn(context.Background(), newOutboundPolicy(nil, nil, false, direct))
+
+	b := buf.NewSize(1)
+	defer b.Release()
+	_ = b.WriteByte(0)
+	if err := c.WritePacket(b, M.ParseSocksaddr("1.1.1.1:53")); err == nil {
+		t.Fatal("expected the ListenUDP error to end the stream")
+	}
+}
+
+func TestRoutedPacketConnCloseUnblocksRead(t *testing.T) {
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	c := newRoutedPacketConn(context.Background(), newOutboundPolicy(nil, nil, false, direct))
+
+	done := make(chan error, 1)
+	go func() {
+		b := buf.NewSize(1)
+		defer b.Release()
+		_, err := c.ReadPacket(b)
+		done <- err
+	}()
+
+	c.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ReadPacket returned nil error after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadPacket still blocked after Close")
 	}
 }

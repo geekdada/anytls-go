@@ -79,25 +79,17 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, legacy bool, counter s
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	c, err := net.ListenPacket("udp", "")
-	if err != nil {
-		logrus.Debugln("proxyOutboundUoT ListenPacket:", err)
-		err = E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
-		return err
-	}
-
-	err = N.ReportHandshakeSuccess(conn)
-	if err != nil {
-		return err
-	}
-
-	packetConn := newPolicyPacketConn(ctx, bufio.NewPacketConn(c), policy)
-
 	uotConn := N.PacketConn(uot.NewConn(conn, *request))
 	if counter != nil {
 		uotConn = bufio.NewCounterPacketConn(uotConn,
 			[]N.CountFunc{func(n int64) { counter.AddTx(n) }},
 			[]N.CountFunc{func(n int64) { counter.AddRx(n) }})
 	}
-	return bufio.CopyPacketConn(ctx, uotConn, packetConn)
+
+	err := N.ReportHandshakeSuccess(conn)
+	if err != nil {
+		return err
+	}
+
+	return bufio.CopyPacketConn(ctx, uotConn, newRoutedPacketConn(ctx, policy))
 }

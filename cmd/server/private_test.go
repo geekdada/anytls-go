@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -69,12 +70,13 @@ func TestPolicyPrivateFilterAllowsHijack(t *testing.T) {
 	}
 }
 
-func TestPolicyPacketConnDropsPrivate(t *testing.T) {
-	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, nil, true, nil))
+func TestRoutedPacketConnDropsPrivate(t *testing.T) {
+	direct := &stubOutbound{packets: &stubPacketConn{}}
+	c := newRoutedPacketConn(context.Background(), newOutboundPolicy(nil, nil, true, direct))
 	writeTestPacket(t, c, "192.168.1.1:53")
 	writeTestPacket(t, c, "1.1.1.1:53")
-	if len(stub.written) != 1 || stub.written[0] != "1.1.1.1:53" {
-		t.Fatalf("written = %v, want only 1.1.1.1:53", stub.written)
+	if len(direct.packets.written) != 1 || direct.packets.written[0] != "1.1.1.1:53" {
+		t.Fatalf("written = %v, want only 1.1.1.1:53", direct.packets.written)
 	}
 }
 
