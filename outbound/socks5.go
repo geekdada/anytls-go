@@ -58,32 +58,64 @@ func (s *SOCKS5) ListenUDP(ctx context.Context) (N.PacketConn, error) {
 	udpConn, err := s.dialer.DialContext(ctx, "udp", relay.String())
 	if err != nil {
 		control.Close()
+		err = fmt.Errorf("socks5 %s: relay %s: %w", s.addr, relay, err)
+		s.logFailure(ctx, socks5.CommandUDPAssociate, socks5.Response{}, err)
 		return nil, err
 	}
 	return newSOCKS5PacketConn(socks.NewAssociatePacketConn(udpConn, M.Socksaddr{}, control), control), nil
 }
 
 func (s *SOCKS5) handshake(ctx context.Context, command byte, destination M.Socksaddr) (net.Conn, socks5.Response, error) {
+	conn, response, err := s.negotiate(ctx, command, destination)
+	if err != nil {
+		err = fmt.Errorf("socks5 %s: %w", s.addr, err)
+		s.logFailure(ctx, command, response, err)
+		return nil, socks5.Response{}, err
+	}
+	return conn, response, nil
+}
+
+// negotiate dials the proxy and runs one SOCKS5 request on the connection. On
+// failure it still returns the proxy's reply, so the caller can tell a refused
+// request from a broken proxy.
+func (s *SOCKS5) negotiate(ctx context.Context, command byte, destination M.Socksaddr) (net.Conn, socks5.Response, error) {
 	conn, err := s.dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
-		return nil, socks5.Response{}, fmt.Errorf("socks5 %s: %w", s.addr, err)
+		return nil, socks5.Response{}, err
 	}
-	err = conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
+	response, err := s.clientHandshake(conn, command, destination)
 	if err != nil {
 		conn.Close()
-		return nil, socks5.Response{}, fmt.Errorf("socks5 %s: %w", s.addr, err)
+		return nil, response, err
+	}
+	return conn, response, nil
+}
+
+func (s *SOCKS5) clientHandshake(conn net.Conn, command byte, destination M.Socksaddr) (socks5.Response, error) {
+	err := conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
+	if err != nil {
+		return socks5.Response{}, err
 	}
 	response, err := socks.ClientHandshake5(conn, command, destination, s.username, s.password)
 	if err != nil {
-		conn.Close()
-		return nil, socks5.Response{}, fmt.Errorf("socks5 %s: %w", s.addr, err)
+		return response, err
 	}
-	err = conn.SetDeadline(time.Time{})
-	if err != nil {
-		conn.Close()
-		return nil, socks5.Response{}, fmt.Errorf("socks5 %s: %w", s.addr, err)
+	return response, conn.SetDeadline(time.Time{})
+}
+
+// logFailure warns when the proxy itself is at fault: it cannot be dialed, the
+// handshake or authentication fails or times out, or it refuses UDP ASSOCIATE.
+// The operator has to fix those, and at debug level they would go unnoticed.
+// A reply code refusing a CONNECT reports the destination, as a failed direct
+// dial would, and a canceled context means the client went away, so both stay
+// at debug. err never carries the credentials.
+func (s *SOCKS5) logFailure(ctx context.Context, command byte, response socks5.Response, err error) {
+	refusedConnect := command == socks5.CommandConnect && response.ReplyCode != socks5.ReplyCodeSuccess
+	if refusedConnect || ctx.Err() != nil {
+		logrus.Debugln("[Outbound]", err)
+		return
 	}
-	return conn, response, nil
+	logrus.Warnln("[Outbound]", err)
 }
 
 // relayAddr replaces an unspecified bind address with the address the proxy
