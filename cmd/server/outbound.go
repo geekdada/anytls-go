@@ -1,10 +1,30 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
+	"anytls/config"
 	"anytls/outbound"
 )
+
+// newOutbounds builds the named outbound map from the outbounds config. Only
+// the built-in direct and socks5 types are supported; direct takes no options.
+func newOutbounds(entries []config.OutboundEntry) (map[string]outbound.Outbound, error) {
+	list := make([]namedOutbound, 0, len(entries))
+	for _, entry := range entries {
+		switch entry.Kind() {
+		case "direct":
+			list = append(list, namedOutbound{entry.Name, outbound.NewDirect()})
+		case "socks5":
+			socks5 := entry.SOCKS5
+			list = append(list, namedOutbound{entry.Name, outbound.NewSOCKS5(socks5.Addr, socks5.Username, socks5.Password)})
+		default:
+			return nil, fmt.Errorf("outbound %q: unsupported type %q", entry.Name, entry.Type)
+		}
+	}
+	return outboundMap(list, outbound.NewDirect()), nil
+}
 
 // namedOutbound pairs an outbound with its configured name.
 type namedOutbound struct {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"anytls/acl"
+	"anytls/config"
 	"anytls/outbound"
 	"anytls/resolver"
 
@@ -56,6 +57,30 @@ func testEngineWith(t *testing.T, rules string, obs map[string]outbound.Outbound
 		t.Fatal(err)
 	}
 	return e
+}
+
+func TestNewOutbounds(t *testing.T) {
+	entries := []config.OutboundEntry{
+		{Name: "warp", Type: "SOCKS5", SOCKS5: config.OutboundSOCKS5Config{Addr: "127.0.0.1:40000"}},
+		{Name: "d", Type: "direct"},
+	}
+	obs, err := newOutbounds(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := obs["warp"].(*outbound.SOCKS5); !ok {
+		t.Errorf("warp = %T, want *outbound.SOCKS5", obs["warp"])
+	}
+	if _, ok := obs["d"].(*outbound.Direct); !ok {
+		t.Errorf("d = %T, want *outbound.Direct", obs["d"])
+	}
+	if obs["default"] != obs["warp"] {
+		t.Errorf("default = %v, want the first entry", obs["default"])
+	}
+
+	if _, err := newOutbounds([]config.OutboundEntry{{Name: "h", Type: "http"}}); err == nil {
+		t.Error("http outbound: err = nil, want an error")
+	}
 }
 
 func TestOutboundMapBuiltins(t *testing.T) {

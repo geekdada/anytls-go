@@ -142,7 +142,15 @@ func main() {
 		logrus.Infoln("[Resolver] using", cfg.Resolver.Kind(), "resolver", cfg.Resolver.Addr())
 	}
 
-	obs := outboundMap(nil, outbound.NewDirect())
+	obs, err := newOutbounds(cfg.Outbounds)
+	if err != nil {
+		logrus.Fatalln("outbounds:", err)
+	}
+	for _, entry := range cfg.Outbounds {
+		if entry.Kind() == "socks5" {
+			logrus.Infof("[Outbound] %s: socks5 via %s", entry.Name, entry.SOCKS5.Addr)
+		}
+	}
 
 	var aclEngine *acl.Engine[outbound.Outbound]
 	if cfg.ACLEnabled() {

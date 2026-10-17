@@ -8,10 +8,13 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
 	"anytls/auth"
+	"anytls/outbound"
+	"anytls/outbound/outboundtest"
 	"anytls/proxy/padding"
 	"anytls/stats"
 	"anytls/util"
@@ -92,6 +95,30 @@ func TestIdleStreamIsClosed(t *testing.T) {
 	}
 }
 
+func TestTCPThroughSOCKS5(t *testing.T) {
+	srv := outboundtest.NewSOCKS5Server(t, "u", "p")
+	echo := tcpEcho(t)
+	conn := openStream(t, stats.NewRegistry(), echo, []byte("ping"),
+		newOutboundPolicy(nil, nil, false, outbound.NewSOCKS5(srv.Addr, "u", "p")))
+
+	if got := readPSH(t, conn, 1); string(got) != "ping" {
+		t.Fatalf("echo = %q, want ping", got)
+	}
+	if got := srv.ConnectDestinations(); !slices.Equal(got, []string{echo.String()}) {
+		t.Fatalf("connect destinations = %v, want [%s]", got, echo)
+	}
+}
+
+func TestUoTThroughSOCKS5(t *testing.T) {
+	srv := outboundtest.NewSOCKS5Server(t, "u", "p")
+	conn := openStream(t, stats.NewRegistry(), uot.RequestDestination(uot.Version), uotBody(t, uot.Version, udpEcho(t)),
+		newOutboundPolicy(nil, nil, false, outbound.NewSOCKS5(srv.Addr, "u", "p")))
+
+	if got := readPSH(t, conn, 1); len(got) == 0 {
+		t.Fatal("no echoed UoT packet")
+	}
+}
+
 func frameBytes(cmd byte, sid uint32, data []byte) []byte {
 	b := make([]byte, 7+len(data))
 	b[0] = cmd
@@ -105,7 +132,7 @@ func TestUoTStreamIsNotTraced(t *testing.T) {
 	for _, version := range []uint8{uot.Version, uot.LegacyVersion} {
 		t.Run(uot.RequestDestination(version).Fqdn, func(t *testing.T) {
 			registry := stats.NewRegistry()
-			conn := openStream(t, registry, uot.RequestDestination(version), uotBody(t, version, udpEcho(t)))
+			conn := openStream(t, registry, uot.RequestDestination(version), uotBody(t, version, udpEcho(t)), newOutboundPolicy(nil, nil, false, nil))
 			if got := readPSH(t, conn, 1); len(got) == 0 {
 				t.Fatal("no echoed UoT packet")
 			}
@@ -123,7 +150,7 @@ func TestUoTStreamIsNotTraced(t *testing.T) {
 
 func TestTCPTrafficExcludesTargetHeader(t *testing.T) {
 	registry := stats.NewRegistry()
-	conn := openStream(t, registry, tcpEcho(t), []byte("ping"))
+	conn := openStream(t, registry, tcpEcho(t), []byte("ping"), newOutboundPolicy(nil, nil, false, nil))
 	if got := readPSH(t, conn, 1); string(got) != "ping" {
 		t.Fatalf("echo = %q, want ping", got)
 	}
@@ -131,13 +158,13 @@ func TestTCPTrafficExcludesTargetHeader(t *testing.T) {
 	waitTraffic(t, registry, stats.TrafficEntry{Tx: 4, Rx: 4})
 }
 
-// openStream authenticates to a server that reports to registry and allows
-// private targets, opens stream 1 to target and sends body on it.
-func openStream(t *testing.T, registry *stats.Registry, target M.Socksaddr, body []byte) net.Conn {
+// openStream authenticates to a server that reports to registry and uses
+// policy, opens stream 1 to target and sends body on it.
+func openStream(t *testing.T, registry *stats.Registry, target M.Socksaddr, body []byte, policy *outboundPolicy) net.Conn {
 	t.Helper()
 	s := testServer(t, "pw")
 	s.stats = registry
-	s.policy = newOutboundPolicy(nil, nil, false, nil)
+	s.policy = policy
 	clientConn, _ := serve(t, s)
 	conn := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true})
 

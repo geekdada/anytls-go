@@ -153,6 +153,17 @@ trafficStats:
 outbound:
   allowPrivate: false   # 默认 false：禁止客户端访问回环、内网、链路本地等地址
 
+# 出站列表（可选）：ACL 规则按名称引用，default 为第一项
+# outbounds:
+#   - name: warp
+#     type: socks5        # direct | socks5
+#     socks5:
+#       addr: 127.0.0.1:1080
+#       username: user
+#       password: pass
+#   - name: d
+#     type: direct
+
 # 带宽限速（可选，留空或 0 表示不限速）
 bandwidth:
   up: 100 mbps    # 服务器发送给客户端的最大速率（即客户端下载）
@@ -194,15 +205,26 @@ bandwidth:
 
 ### ACL 规则
 
-配置 `acl` 后，服务端按 [hysteria 2 的 ACL](https://v2.hysteria.network/zh/docs/advanced/ACL/) 语法与匹配语义过滤客户端请求，但**不包含 outbounds 控制**：规则目标只有内置的 `direct`（直连）、`reject`（拒绝）、`default`（等同 `direct`），使用其他出站名会在启动时报错。
+配置 `acl` 后，服务端按 [hysteria 2 的 ACL](https://v2.hysteria.network/zh/docs/advanced/ACL/) 语法与匹配语义过滤客户端请求。规则目标为内置的 `direct`（直连）、`reject`（拒绝）、`default`（[`outbounds`](#出站outbounds) 的第一项，未配置时等同 `direct`），以及 `outbounds` 中任意条目的名称；名称匹配不区分大小写，引用不存在的名称会在启动时报错。
 
-- 规则自上而下匹配，首个命中生效；全部未命中默认 `direct`。支持 `#` 注释。
+- 规则自上而下匹配，首个命中生效；全部未命中默认 `default`。支持 `#` 注释。
 - 地址类型与 hysteria 一致：单个 IP、CIDR、域名、`*.example.com` 通配、`suffix:` 域名后缀、`geoip:xx`、`geosite:xx`（支持 `@attr` 标签）、`all`。
 - `proto/port` 与劫持地址语义一致，如 `reject(all, udp/443)` 屏蔽 QUIC、`direct(8.8.8.8, udp/53, 1.1.1.1)` 劫持目标地址（仅 IP，不可为域名）。
-- 与 hysteria 相同，域名请求会先解析再匹配，IP 类规则对域名请求同样生效；TCP 直接拨解析出的 IP。解析所用的 DNS 服务器可通过 [`resolver`](#自定义-dns-解析器) 指定，留空则用系统解析器。
+- 与 hysteria 相同，域名请求会先解析再匹配，IP 类规则对域名请求同样生效；`direct` 出站通常拨解析出的 IP，`socks5` 出站传域名由代理解析。解析所用的 DNS 服务器可通过 [`resolver`](#自定义-dns-解析器) 指定，留空则用系统解析器。
 - UDP（udp over tcp）按**每个报文**的目标地址检查：命中 `reject` 的报文静默丢弃、流保持存活；命中劫持规则的报文改写目标地址。决策按目标地址在流生命周期内缓存。
 - `geoip:`/`geosite:` 使用 v2ray 数据文件；未配置 `acl.geoip`/`acl.geosite` 路径时自动下载（Loyalsoldier v2ray-rules-dat），并按 `acl.geoUpdateInterval` 周期更新（默认 7 天）。
 - `file` 与 `inline` 互斥；规则编译失败会导致启动失败。
+
+### 出站（outbounds）
+
+`outbounds` 定义具名出站，ACL 规则按名称引用。支持 `direct`（直连）与 `socks5` 两种类型，类型不区分大小写。`default` 始终表示列表中的第一项；未配置 ACL 时所有流量都走 `default`，未配置 `outbounds` 时 `default` 等同 `direct`。用户条目可以覆盖内置名称 `direct`、`reject`、`default`。
+
+- `socks5` 需要 `addr`，`username` 与 `password` 同时设置或同时省略。SOCKS5 出站接收域名并自行解析；本地解析结果只用于 ACL 匹配与私网检查，不用于拨号。
+- `outbound.allowPrivate: false` 时，域名仍会先在本地解析并检查是否属于内网，本地解析不出的域名会被拒绝。
+- UDP（udp over tcp）通过 SOCKS5 的 UDP ASSOCIATE 转发。一条 UoT 流在首个被允许的报文上绑定出站，之后 ACL 改判到其他出站的报文会被丢弃。
+- 不支持 `direct` 的额外选项（如 `bindIPv4`）和 `http` 出站，配置后启动失败。
+
+私网检查在本地完成，目标域名随后由 SOCKS5 代理自行解析。代理与服务端同机或位于内网时，必须由代理侧限制可访问的目标，否则客户端仍可通过该代理访问代理所在的网络。
 
 ### 出站目标限制
 
