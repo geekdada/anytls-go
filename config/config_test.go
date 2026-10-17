@@ -716,6 +716,112 @@ func TestLoadFileOutboundAllowPrivate(t *testing.T) {
 	}
 }
 
+func TestLoadFileOutbounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbounds.yaml")
+	body := `password: hunter2
+outbounds:
+  - name: warp
+    type: SOCKS5
+    socks5:
+      addr: 127.0.0.1:40000
+      username: u
+      password: p
+  - name: direct
+    type: direct
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Outbounds) != 2 {
+		t.Fatalf("len(Outbounds) = %d, want 2", len(c.Outbounds))
+	}
+	if got := c.Outbounds[0].Kind(); got != "socks5" {
+		t.Errorf("Kind() = %q, want socks5", got)
+	}
+	if got := c.Outbounds[0].SOCKS5.Addr; got != "127.0.0.1:40000" {
+		t.Errorf("SOCKS5.Addr = %q, want 127.0.0.1:40000", got)
+	}
+	if got := c.Outbounds[0].SOCKS5.Username; got != "u" {
+		t.Errorf("SOCKS5.Username = %q, want u", got)
+	}
+	if got := c.Outbounds[0].SOCKS5.Password; got != "p" {
+		t.Errorf("SOCKS5.Password = %q, want p", got)
+	}
+	if got := c.Outbounds[1].Kind(); got != "direct" {
+		t.Errorf("Kind() = %q, want direct", got)
+	}
+}
+
+func TestLoadFileOutboundsValidation(t *testing.T) {
+	dir := t.TempDir()
+	longCredential := strings.Repeat("u", 256)
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "empty name",
+			body:    "outbounds:\n  - type: direct\n",
+			wantErr: "outbounds[0].name: empty outbound name",
+		},
+		{
+			name:    "duplicate name",
+			body:    "outbounds:\n  - name: a\n    type: direct\n  - name: A\n    type: direct\n",
+			wantErr: `outbounds[1].name: duplicate outbound name "A"`,
+		},
+		{
+			name:    "unsupported type",
+			body:    "outbounds:\n  - name: h\n    type: http\n",
+			wantErr: `outbounds[0].type: unsupported outbound type "http"`,
+		},
+		{
+			name:    "socks5 without addr",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n",
+			wantErr: "outbounds[0].socks5.addr: empty socks5 address",
+		},
+		{
+			name:    "socks5 addr without port",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: 127.0.0.1\n",
+			wantErr: "outbounds[0].socks5.addr",
+		},
+		{
+			name:    "username without password",
+			body:    "outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:40000\n      username: u\n",
+			wantErr: "outbounds[0].socks5: username and password must both be set or both be omitted",
+		},
+		{
+			name:    "overlong credentials",
+			body:    fmt.Sprintf("outbounds:\n  - name: s\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:40000\n      username: %s\n      password: %s\n", longCredential, longCredential),
+			wantErr: "outbounds[0].socks5: username and password must be at most 255 bytes",
+		},
+		{
+			name:    "direct options",
+			body:    "outbounds:\n  - name: d\n    type: direct\n    direct:\n      bindIPv4: 1.2.3.4\n",
+			wantErr: "outbounds[0].direct: direct outbound options are not supported",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".yaml")
+			if err := os.WriteFile(path, []byte("password: hunter2\n"+tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadFile(path)
+			if err == nil {
+				t.Fatalf("expected load to fail for %s", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestAuthMaxConcurrent(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {

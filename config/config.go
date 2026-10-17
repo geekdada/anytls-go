@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strconv"
@@ -28,6 +29,30 @@ type Config struct {
 	TrafficStats  TrafficStatsConfig `yaml:"trafficStats"`
 	Bandwidth     BandwidthConfig    `yaml:"bandwidth"`
 	Outbound      OutboundConfig     `yaml:"outbound"`
+	Outbounds     []OutboundEntry    `yaml:"outbounds"`
+}
+
+// OutboundEntry is one named outbound in the outbounds list. Only the block
+// matching Type is read.
+type OutboundEntry struct {
+	Name   string               `yaml:"name"`
+	Type   string               `yaml:"type"`
+	Direct map[string]any       `yaml:"direct"`
+	SOCKS5 OutboundSOCKS5Config `yaml:"socks5"`
+}
+
+// OutboundSOCKS5Config is a SOCKS5 server the node routes through. Username
+// and Password must be set together.
+type OutboundSOCKS5Config struct {
+	Addr     string `yaml:"addr"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// Kind returns the normalized outbound type. Hysteria matches types
+// case-insensitively, so do the same.
+func (e *OutboundEntry) Kind() string {
+	return strings.ToLower(strings.TrimSpace(e.Type))
 }
 
 // OutboundConfig controls where clients may connect through the server.
@@ -164,6 +189,9 @@ func LoadFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	if err := c.ValidateResolver(); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
+	if err := c.ValidateOutbounds(); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 	if err := c.ValidateStats(); err != nil {
@@ -367,6 +395,54 @@ func (c *Config) ResolverEnabled() bool {
 // ValidateResolver validates the resolver block.
 func (c *Config) ValidateResolver() error {
 	return c.Resolver.Validate()
+}
+
+// ValidateOutbounds checks the outbounds list and reports the first invalid
+// entry. Names are compared case-insensitively because ACL rules match
+// outbound names that way.
+func (c *Config) ValidateOutbounds() error {
+	seen := make(map[string]struct{}, len(c.Outbounds))
+	for i := range c.Outbounds {
+		e := &c.Outbounds[i]
+		if e.Name == "" {
+			return fmt.Errorf("outbounds[%d].name: empty outbound name", i)
+		}
+		key := strings.ToLower(e.Name)
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("outbounds[%d].name: duplicate outbound name %q", i, e.Name)
+		}
+		seen[key] = struct{}{}
+		switch e.Kind() {
+		case "direct":
+			if len(e.Direct) > 0 {
+				return fmt.Errorf("outbounds[%d].direct: direct outbound options are not supported", i)
+			}
+		case "socks5":
+			if err := e.SOCKS5.validate(i); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("outbounds[%d].type: unsupported outbound type %q", i, e.Type)
+		}
+	}
+	return nil
+}
+
+func (s *OutboundSOCKS5Config) validate(index int) error {
+	if s.Addr == "" {
+		return fmt.Errorf("outbounds[%d].socks5.addr: empty socks5 address", index)
+	}
+	if _, _, err := net.SplitHostPort(s.Addr); err != nil {
+		return fmt.Errorf("outbounds[%d].socks5.addr %q: %w", index, s.Addr, err)
+	}
+	if (s.Username == "") != (s.Password == "") {
+		return fmt.Errorf("outbounds[%d].socks5: username and password must both be set or both be omitted", index)
+	}
+	// RFC 1929 encodes each length in one byte.
+	if len(s.Username) > 255 || len(s.Password) > 255 {
+		return fmt.Errorf("outbounds[%d].socks5: username and password must be at most 255 bytes", index)
+	}
+	return nil
 }
 
 // ValidateTLS ensures cert and key are both set or both omitted.
