@@ -7,6 +7,7 @@ import (
 	"net/netip"
 
 	"anytls/acl"
+	"anytls/outbound"
 	"anytls/resolver"
 
 	"github.com/sagernet/sing/common/buf"
@@ -16,7 +17,7 @@ import (
 )
 
 var (
-	errACLRejected        = errors.New("rejected by ACL")
+	errACLRejected        = outbound.ErrRejected
 	errPrivateDestination = errors.New("private destination not allowed")
 )
 
@@ -24,22 +25,28 @@ var (
 const maxSessionACLCache = 256
 
 // outboundPolicy carries the per-request policy dependencies: the optional ACL
-// engine, the optional custom DNS resolver and the private-destination filter.
-// A nil resolver means the system resolver which, as in hysteria, is only
-// consulted when the ACL or the private filter needs the destination IPs.
+// engine, the optional custom DNS resolver, the private-destination filter and
+// the outbound used when no rule matches. A nil resolver means the system
+// resolver which, as in hysteria, is only consulted when the ACL or the private
+// filter needs the destination IPs.
 type outboundPolicy struct {
-	acl          *acl.Engine
+	acl          *acl.Engine[outbound.Outbound]
 	resolver     resolver.Resolver
 	blockPrivate bool
+	fallback     outbound.Outbound
 }
 
-func newOutboundPolicy(engine *acl.Engine, res resolver.Resolver, blockPrivate bool) *outboundPolicy {
-	return &outboundPolicy{acl: engine, resolver: res, blockPrivate: blockPrivate}
+func newOutboundPolicy(engine *acl.Engine[outbound.Outbound], res resolver.Resolver, blockPrivate bool, fallback outbound.Outbound) *outboundPolicy {
+	if fallback == nil {
+		fallback = outbound.NewDirect()
+	}
+	return &outboundPolicy{acl: engine, resolver: res, blockPrivate: blockPrivate, fallback: fallback}
 }
 
-// active reports whether the policy has anything to enforce.
-func (p *outboundPolicy) active() bool {
-	return p != nil && (p.acl != nil || p.resolver != nil || p.blockPrivate)
+// route is one policy decision: the outbound to use and the address to hand it.
+type route struct {
+	outbound outbound.Outbound
+	target   M.Socksaddr
 }
 
 // hostInfo builds the host and addresses used for ACL matching and for picking
@@ -50,8 +57,8 @@ func (p *outboundPolicy) active() bool {
 // The third return value reports whether a resolution attempt actually ran, and
 // so whether an empty result is fatal. No attempt is made for an IP literal, or
 // when no resolver is set and neither the ACL nor the private filter needs the
-// addresses — in which case the
-// dialer resolves at connect time, as hysteria's directOutbound does.
+// addresses; in that case the chosen outbound resolves the name itself, as
+// hysteria's outbounds do.
 func (p *outboundPolicy) hostInfo(ctx context.Context, destination M.Socksaddr) (string, resolver.Result, bool) {
 	if !destination.IsFqdn() {
 		ip := net.IP(destination.Addr.AsSlice())
@@ -98,38 +105,48 @@ func ipToNetip(ip net.IP) netip.Addr {
 	return addr.Unmap()
 }
 
-// dialAddr applies the policy to one destination and returns the address to
-// use: the hijack IP when the matched rule carries one, otherwise the resolved
-// IP (so the connection goes to the IP that was matched), or the original
-// destination when no resolution was attempted. It returns errACLRejected when a
-// rule rejects the request, or a resolver.Error when resolution ran but yielded
-// nothing, or errPrivateDestination when the private filter is on and the
-// address to dial is not public. A hijack address is exempt from the filter
-// because the operator chose it.
+// selectRoute applies the policy to one destination and returns the outbound to
+// use and the address to give it: the hijack IP when the matched rule carries
+// one, the resolved IP (so the connection goes to the IP that was matched), or
+// the original destination for a remote-resolving outbound. It returns
+// errACLRejected when a rule rejects the request, or a resolver.Error when
+// resolution ran but yielded nothing, or errPrivateDestination when the private
+// filter is on and the address to dial is not public. A hijack address is
+// exempt from the filter because the operator chose it.
 //
 // The order matters and mirrors hysteria's Resolver(ACL(outbound)) chain:
 // resolution failure is not fatal until after the ACL has had its say, so
 // name-based reject rules still fire on an unresolvable domain and a hijack rule
 // can still redirect one.
-func (p *outboundPolicy) dialAddr(ctx context.Context, destination M.Socksaddr, proto acl.Protocol) (M.Socksaddr, error) {
+func (p *outboundPolicy) selectRoute(ctx context.Context, destination M.Socksaddr, proto acl.Protocol) (route, error) {
 	host, result, attempted := p.hostInfo(ctx, destination)
+	ob := p.fallback
 	if p.acl != nil {
-		action, hijack := p.acl.Lookup(host, result.IPv4, result.IPv6, proto, destination.Port)
-		if action == acl.ActionReject {
-			return M.Socksaddr{}, errACLRejected
+		var hijack net.IP
+		ob, hijack = p.acl.Lookup(host, result.IPv4, result.IPv6, proto, destination.Port)
+		if _, ok := ob.(outbound.Reject); ok {
+			return route{}, errACLRejected
 		}
 		if hijack != nil {
-			return M.SocksaddrFrom(ipToNetip(hijack), destination.Port), nil
+			return route{ob, M.SocksaddrFrom(ipToNetip(hijack), destination.Port)}, nil
 		}
 	}
 	addr, err := pickDialAddr(destination, result, attempted)
 	if err != nil {
-		return M.Socksaddr{}, err
+		// A remote-resolving outbound can still reach a name the local resolver
+		// cannot, unless the private filter needs the IP to decide.
+		if !ob.RemoteResolve() || p.blockPrivate {
+			return route{}, err
+		}
+		return route{ob, destination}, nil
 	}
 	if p.blockPrivate && addr.IsIP() && isPrivateAddr(addr.Addr) {
-		return M.Socksaddr{}, errPrivateDestination
+		return route{}, errPrivateDestination
 	}
-	return addr, nil
+	if ob.RemoteResolve() {
+		return route{ob, destination}, nil
+	}
+	return route{ob, addr}, nil
 }
 
 // pickDialAddr prefers the resolved IPv4 address, then IPv6, and keeps the
@@ -180,14 +197,14 @@ func newPolicyPacketConn(ctx context.Context, conn N.PacketConn, p *outboundPoli
 }
 
 func (c *policyPacketConn) decide(destination M.Socksaddr) policyDecision {
-	dest, err := c.policy.dialAddr(c.ctx, destination, acl.ProtocolUDP)
+	r, err := c.policy.selectRoute(c.ctx, destination, acl.ProtocolUDP)
 	if err != nil {
 		if !errors.Is(err, errACLRejected) && !errors.Is(err, errPrivateDestination) {
 			logrus.Debugln("policyPacketConn drop:", destination, err)
 		}
 		return policyDecision{rejected: true}
 	}
-	return policyDecision{dest: dest}
+	return policyDecision{dest: r.target}
 }
 
 func (c *policyPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) error {

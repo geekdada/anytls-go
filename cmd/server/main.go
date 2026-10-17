@@ -17,6 +17,7 @@ import (
 	"anytls/auth"
 	"anytls/config"
 	"anytls/limiter"
+	"anytls/outbound"
 	"anytls/proxy/padding"
 	"anytls/resolver"
 	"anytls/stats"
@@ -141,7 +142,9 @@ func main() {
 		logrus.Infoln("[Resolver] using", cfg.Resolver.Kind(), "resolver", cfg.Resolver.Addr())
 	}
 
-	var aclEngine *acl.Engine
+	obs := outboundMap(nil, outbound.NewDirect())
+
+	var aclEngine *acl.Engine[outbound.Outbound]
 	if cfg.ACLEnabled() {
 		geoInterval, err := cfg.GeoUpdateInterval()
 		if err != nil {
@@ -153,13 +156,13 @@ func main() {
 			UpdateInterval:  geoInterval,
 		}
 		if cfg.ACL.File != "" {
-			aclEngine, err = acl.NewEngineFromFile(cfg.ACL.File, geoLoader)
+			aclEngine, err = acl.NewEngineFromFile(cfg.ACL.File, obs, geoLoader)
 			if err != nil {
 				logrus.Fatalln("acl:", err)
 			}
 			logrus.Infoln("[ACL] loaded rules from file:", cfg.ACL.File)
 		} else {
-			aclEngine, err = acl.NewEngineFromString(strings.Join(cfg.ACL.Inline, "\n"), geoLoader)
+			aclEngine, err = acl.NewEngineFromString(strings.Join(cfg.ACL.Inline, "\n"), obs, geoLoader)
 			if err != nil {
 				logrus.Fatalln("acl:", err)
 			}
@@ -195,7 +198,8 @@ func main() {
 	if cfg.Outbound.AllowPrivate {
 		logrus.Warnln("[Outbound] private destinations allowed: clients can reach the server's loopback and LAN")
 	}
-	server := NewMyServer(tlsConfig, authn, registry, limits, aclEngine, dnsResolver, !cfg.Outbound.AllowPrivate)
+	policy := newOutboundPolicy(aclEngine, dnsResolver, !cfg.Outbound.AllowPrivate, obs["default"])
+	server := NewMyServer(tlsConfig, authn, registry, limits, policy)
 
 	go func() {
 		<-ctx.Done()

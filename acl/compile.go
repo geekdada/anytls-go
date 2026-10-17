@@ -32,35 +32,6 @@ func (p Protocol) String() string {
 	}
 }
 
-// Action is what a matched rule does with the request. anytls has no
-// outbounds list, so Hysteria's built-in outbounds collapse to: "direct" and
-// "default" forward to the system dialer, "reject" refuses the request.
-type Action int
-
-const (
-	ActionDirect Action = iota
-	ActionReject
-)
-
-func (a Action) String() string {
-	switch a {
-	case ActionDirect:
-		return "direct"
-	case ActionReject:
-		return "reject"
-	default:
-		return fmt.Sprintf("Action(%d)", int(a))
-	}
-}
-
-// outboundActions is the fixed set of rule targets, matching Hysteria's
-// built-in outbounds when no outbounds list is configured.
-var outboundActions = map[string]Action{
-	"direct":  ActionDirect,
-	"default": ActionDirect,
-	"reject":  ActionReject,
-}
-
 type HostInfo struct {
 	Name string
 	IPv4 net.IP
@@ -71,12 +42,12 @@ func (h HostInfo) String() string {
 	return fmt.Sprintf("%s|%s|%s", h.Name, h.IPv4, h.IPv6)
 }
 
-type CompiledRuleSet interface {
-	Match(host HostInfo, proto Protocol, port uint16) (Action, bool, net.IP)
+type CompiledRuleSet[O any] interface {
+	Match(host HostInfo, proto Protocol, port uint16) (O, bool, net.IP)
 }
 
-type compiledRule struct {
-	Action        Action
+type compiledRule[O any] struct {
+	Outbound      O
 	HostMatcher   hostMatcher
 	Protocol      Protocol
 	StartPort     uint16
@@ -84,7 +55,7 @@ type compiledRule struct {
 	HijackAddress net.IP
 }
 
-func (r *compiledRule) Match(host HostInfo, proto Protocol, port uint16) bool {
+func (r *compiledRule[O]) Match(host HostInfo, proto Protocol, port uint16) bool {
 	if r.Protocol != ProtocolBoth && r.Protocol != proto {
 		return false
 	}
@@ -94,15 +65,15 @@ func (r *compiledRule) Match(host HostInfo, proto Protocol, port uint16) bool {
 	return r.HostMatcher.Match(host)
 }
 
-type matchResult struct {
-	Action        Action
+type matchResult[O any] struct {
+	Outbound      O
 	Matched       bool
 	HijackAddress net.IP
 }
 
-type compiledRuleSetImpl struct {
-	Rules []compiledRule
-	Cache *lru.Cache[matchResultCacheKey, matchResult]
+type compiledRuleSetImpl[O any] struct {
+	Rules []compiledRule[O]
+	Cache *lru.Cache[matchResultCacheKey, matchResult[O]]
 }
 
 type matchResultCacheKey struct {
@@ -111,7 +82,8 @@ type matchResultCacheKey struct {
 	Port  uint16
 }
 
-func (s *compiledRuleSetImpl) Match(host HostInfo, proto Protocol, port uint16) (Action, bool, net.IP) {
+func (s *compiledRuleSetImpl[O]) Match(host HostInfo, proto Protocol, port uint16) (O, bool, net.IP) {
+	var zero O
 	host.Name = strings.TrimRight(strings.ToLower(host.Name), ".") // Normalize host name (lower case, no trailing dots)
 	key := matchResultCacheKey{
 		Host:  host.String(),
@@ -119,18 +91,18 @@ func (s *compiledRuleSetImpl) Match(host HostInfo, proto Protocol, port uint16) 
 		Port:  port,
 	}
 	if result, ok := s.Cache.Get(key); ok {
-		return result.Action, result.Matched, result.HijackAddress
+		return result.Outbound, result.Matched, result.HijackAddress
 	}
 	for _, rule := range s.Rules {
 		if rule.Match(host, proto, port) {
-			result := matchResult{rule.Action, true, rule.HijackAddress}
+			result := matchResult[O]{rule.Outbound, true, rule.HijackAddress}
 			s.Cache.Add(key, result)
-			return result.Action, result.Matched, result.HijackAddress
+			return result.Outbound, result.Matched, result.HijackAddress
 		}
 	}
 	// No match should also be cached
-	s.Cache.Add(key, matchResult{})
-	return ActionDirect, false, nil
+	s.Cache.Add(key, matchResult[O]{})
+	return zero, false, nil
 }
 
 type CompilationError struct {
@@ -147,16 +119,18 @@ type GeoLoader interface {
 	LoadGeoSite() (map[string]*v2geo.GeoSite, error)
 }
 
-// Compile compiles TextRules into a CompiledRuleSet.
+// Compile compiles TextRules into a CompiledRuleSet, resolving each rule's
+// outbound name against outbounds. Names are matched case-insensitively, as in
+// hysteria.
 // We want on-demand loading of GeoIP/GeoSite databases, so instead of passing the
 // databases directly, we use a GeoLoader interface to load them only when needed
 // by at least one rule.
-func Compile(rules []TextRule, cacheSize int, geoLoader GeoLoader) (CompiledRuleSet, error) {
-	compiledRules := make([]compiledRule, len(rules))
+func Compile[O any](rules []TextRule, outbounds map[string]O, cacheSize int, geoLoader GeoLoader) (CompiledRuleSet[O], error) {
+	compiledRules := make([]compiledRule[O], len(rules))
 	for i, rule := range rules {
-		action, ok := outboundActions[strings.ToLower(rule.Outbound)]
+		ob, ok := outbounds[strings.ToLower(rule.Outbound)]
 		if !ok {
-			return nil, &CompilationError{rule.LineNum, fmt.Sprintf("outbound %s not found (anytls ACL supports only direct/reject/default)", rule.Outbound)}
+			return nil, &CompilationError{rule.LineNum, fmt.Sprintf("outbound %s not found", rule.Outbound)}
 		}
 		hm, errStr := compileHostMatcher(rule.Address, geoLoader)
 		if errStr != "" {
@@ -173,13 +147,13 @@ func Compile(rules []TextRule, cacheSize int, geoLoader GeoLoader) (CompiledRule
 				return nil, &CompilationError{rule.LineNum, fmt.Sprintf("invalid hijack address (must be an IP address): %s", rule.HijackAddress)}
 			}
 		}
-		compiledRules[i] = compiledRule{action, hm, proto, startPort, endPort, hijackAddress}
+		compiledRules[i] = compiledRule[O]{ob, hm, proto, startPort, endPort, hijackAddress}
 	}
-	cache, err := lru.New[matchResultCacheKey, matchResult](cacheSize)
+	cache, err := lru.New[matchResultCacheKey, matchResult[O]](cacheSize)
 	if err != nil {
 		return nil, err
 	}
-	return &compiledRuleSetImpl{compiledRules, cache}, nil
+	return &compiledRuleSetImpl[O]{compiledRules, cache}, nil
 }
 
 // parseProtoPort parses the protocol and port from a protoPort string.

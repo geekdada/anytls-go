@@ -14,7 +14,7 @@ default(8.8.8.8, udp/53, 1.1.1.1)
 reject(suffix:bad.com)
 direct(all)
 `
-	e, err := NewEngineFromString(rules, &FileGeoLoader{})
+	e, err := NewEngineFromString(rules, testOutbounds, &FileGeoLoader{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ direct(all)
 		ipv4, ipv6 net.IP
 		proto      Protocol
 		port       uint16
-		wantAction Action
+		wantAction testAction
 		wantHijack net.IP
 	}{
 		{name: "quic blocked", host: "www.example.com", ipv4: net.ParseIP("93.184.216.34"), proto: ProtocolUDP, port: 443, wantAction: ActionReject},
@@ -50,7 +50,7 @@ direct(all)
 }
 
 func TestEngineNoMatchIsDirect(t *testing.T) {
-	e, err := NewEngineFromString("reject(1.2.3.4)\n", &FileGeoLoader{})
+	e, err := NewEngineFromString("reject(1.2.3.4)\n", testOutbounds, &FileGeoLoader{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +64,20 @@ func TestEngineNoMatchIsDirect(t *testing.T) {
 	}
 }
 
+func TestEngineLookupNoMatchUsesDefault(t *testing.T) {
+	outbounds := map[string]testAction{"direct": ActionDirect, "default": "warp"}
+	e, err := NewEngineFromString("direct(1.1.1.1)\n", outbounds, &FileGeoLoader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob, hijack := e.Lookup("example.org", nil, nil, ProtocolTCP, 443)
+	if ob != "warp" || hijack != nil {
+		t.Fatalf("Lookup() = (%q, %v), want (warp, nil)", ob, hijack)
+	}
+}
+
 func TestNewEngineFromStringSyntaxError(t *testing.T) {
-	_, err := NewEngineFromString("not a rule\n", &FileGeoLoader{})
+	_, err := NewEngineFromString("not a rule\n", testOutbounds, &FileGeoLoader{})
 	if err == nil {
 		t.Error("expected syntax error, got nil")
 	}

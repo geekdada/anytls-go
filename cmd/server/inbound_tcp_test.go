@@ -34,7 +34,7 @@ func testServer(t *testing.T, password string) *myServer {
 		t.Fatal(err)
 	}
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{*cert}}
-	return NewMyServer(tlsConfig, auth.NewPasswordAuthenticator(password), nil, nil, nil, nil, true)
+	return NewMyServer(tlsConfig, auth.NewPasswordAuthenticator(password), nil, nil, newOutboundPolicy(nil, nil, true, nil))
 }
 
 // serve runs handleTcpConnection on one end of a pipe and reports when it
@@ -137,7 +137,7 @@ func openStream(t *testing.T, registry *stats.Registry, target M.Socksaddr, body
 	t.Helper()
 	s := testServer(t, "pw")
 	s.stats = registry
-	s.policy = newOutboundPolicy(nil, nil, false)
+	s.policy = newOutboundPolicy(nil, nil, false, nil)
 	clientConn, _ := serve(t, s)
 	conn := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true})
 

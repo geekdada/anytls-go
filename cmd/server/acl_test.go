@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"anytls/acl"
+	"anytls/outbound"
 	"anytls/resolver"
 
 	"github.com/sagernet/sing/common/buf"
@@ -16,13 +17,9 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-func testEngine(t *testing.T, rules string) *acl.Engine {
+func testEngine(t *testing.T, rules string) *acl.Engine[outbound.Outbound] {
 	t.Helper()
-	e, err := acl.NewEngineFromString(rules, &acl.FileGeoLoader{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return e
+	return testEngineWith(t, rules, outboundMap(nil, outbound.NewDirect()))
 }
 
 // stubResolver records the hosts it was asked about and answers with a fixed
@@ -49,11 +46,12 @@ func (s *stubResolver) callCount() int {
 // tcpDialAddr is the TCP-path shorthand used throughout these tests.
 func tcpDialAddr(t *testing.T, p *outboundPolicy, addr string) (M.Socksaddr, error) {
 	t.Helper()
-	return p.dialAddr(context.Background(), M.ParseSocksaddr(addr), acl.ProtocolTCP)
+	r, err := p.selectRoute(context.Background(), M.ParseSocksaddr(addr), acl.ProtocolTCP)
+	return r.target, err
 }
 
 func TestPolicyDialAddrReject(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "reject(10.0.0.0/8)\ndirect(all)\n"), nil, false)
+	p := newOutboundPolicy(testEngine(t, "reject(10.0.0.0/8)\ndirect(all)\n"), nil, false, nil)
 	if _, err := tcpDialAddr(t, p, "10.1.2.3:443"); !errors.Is(err, errACLRejected) {
 		t.Fatalf("expected reject for 10.1.2.3, got err = %v", err)
 	}
@@ -63,7 +61,7 @@ func TestPolicyDialAddrReject(t *testing.T) {
 }
 
 func TestPolicyDialAddrHijack(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8,*,1.1.1.1)\ndirect(all)\n"), nil, false)
+	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8,*,1.1.1.1)\ndirect(all)\n"), nil, false, nil)
 	addr, err := tcpDialAddr(t, p, "8.8.8.8:53")
 	if err != nil {
 		t.Fatalf("expected direct, got err = %v", err)
@@ -74,7 +72,7 @@ func TestPolicyDialAddrHijack(t *testing.T) {
 }
 
 func TestPolicyDialAddrResolvesFqdn(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "reject(127.0.0.1)\ndirect(all)\n"), nil, false)
+	p := newOutboundPolicy(testEngine(t, "reject(127.0.0.1)\ndirect(all)\n"), nil, false, nil)
 	// localhost resolves locally to 127.0.0.1, so the IP rule must apply to
 	// the domain request. This covers the system-resolver path.
 	if _, err := tcpDialAddr(t, p, "localhost:443"); !errors.Is(err, errACLRejected) {
@@ -83,7 +81,7 @@ func TestPolicyDialAddrResolvesFqdn(t *testing.T) {
 }
 
 func TestPolicyDialAddrNoRuleMatchKeepsDestination(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "reject(1.2.3.4)\n"), nil, false)
+	p := newOutboundPolicy(testEngine(t, "reject(1.2.3.4)\n"), nil, false, nil)
 	dst := M.ParseSocksaddr("9.9.9.9:443")
 	addr, err := tcpDialAddr(t, p, "9.9.9.9:443")
 	if err != nil || addr != dst {
@@ -93,7 +91,7 @@ func TestPolicyDialAddrNoRuleMatchKeepsDestination(t *testing.T) {
 
 func TestPolicyDialAddrResolverWithoutACL(t *testing.T) {
 	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
-	p := newOutboundPolicy(nil, res, false)
+	p := newOutboundPolicy(nil, res, false, nil)
 	addr, err := tcpDialAddr(t, p, "example.com:443")
 	if err != nil {
 		t.Fatalf("unexpected err = %v", err)
@@ -111,7 +109,7 @@ func TestPolicyDialAddrResolverPrefersIPv4(t *testing.T) {
 		IPv4: net.IPv4(1, 2, 3, 4).To4(),
 		IPv6: net.ParseIP("2001:db8::1"),
 	}}
-	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false), "example.com:443")
+	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false, nil), "example.com:443")
 	if err != nil {
 		t.Fatalf("unexpected err = %v", err)
 	}
@@ -122,7 +120,7 @@ func TestPolicyDialAddrResolverPrefersIPv4(t *testing.T) {
 
 func TestPolicyDialAddrResolverIPv6Only(t *testing.T) {
 	res := &stubResolver{result: resolver.Result{IPv6: net.ParseIP("2001:db8::1")}}
-	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false), "example.com:443")
+	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false, nil), "example.com:443")
 	if err != nil {
 		t.Fatalf("unexpected err = %v", err)
 	}
@@ -134,7 +132,7 @@ func TestPolicyDialAddrResolverIPv6Only(t *testing.T) {
 func TestPolicyDialAddrResolverFailureFailsRequest(t *testing.T) {
 	inner := errors.New("boom")
 	res := &stubResolver{result: resolver.Result{Err: inner}}
-	_, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false), "example.com:443")
+	_, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false, nil), "example.com:443")
 	var resolveErr resolver.Error
 	if !errors.As(err, &resolveErr) {
 		t.Fatalf("err = %v, want resolver.Error", err)
@@ -147,7 +145,7 @@ func TestPolicyDialAddrResolverFailureFailsRequest(t *testing.T) {
 func TestPolicyDialAddrResolverFailureACLRejectWins(t *testing.T) {
 	// The ACL runs even when resolution failed, so a name rule still fires.
 	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
-	p := newOutboundPolicy(testEngine(t, "reject(suffix:example.com)\ndirect(all)\n"), res, false)
+	p := newOutboundPolicy(testEngine(t, "reject(suffix:example.com)\ndirect(all)\n"), res, false, nil)
 	if _, err := tcpDialAddr(t, p, "blocked.example.com:443"); !errors.Is(err, errACLRejected) {
 		t.Fatalf("err = %v, want errACLRejected", err)
 	}
@@ -157,7 +155,7 @@ func TestPolicyDialAddrResolverFailureACLHijackWins(t *testing.T) {
 	// A hijack rule rescues a domain the resolver could not resolve, matching
 	// hysteria, where the hijack replaces the resolve result.
 	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
-	p := newOutboundPolicy(testEngine(t, "direct(example.com,*,1.1.1.1)\ndirect(all)\n"), res, false)
+	p := newOutboundPolicy(testEngine(t, "direct(example.com,*,1.1.1.1)\ndirect(all)\n"), res, false, nil)
 	addr, err := tcpDialAddr(t, p, "example.com:443")
 	if err != nil {
 		t.Fatalf("unexpected err = %v", err)
@@ -169,7 +167,7 @@ func TestPolicyDialAddrResolverFailureACLHijackWins(t *testing.T) {
 
 func TestPolicyDialAddrACLMatchesResolvedIP(t *testing.T) {
 	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(127, 0, 0, 1).To4()}}
-	p := newOutboundPolicy(testEngine(t, "reject(127.0.0.1)\ndirect(all)\n"), res, false)
+	p := newOutboundPolicy(testEngine(t, "reject(127.0.0.1)\ndirect(all)\n"), res, false, nil)
 	if _, err := tcpDialAddr(t, p, "blocked.example:443"); !errors.Is(err, errACLRejected) {
 		t.Fatalf("err = %v, want the resolved IP to hit the reject rule", err)
 	}
@@ -177,7 +175,7 @@ func TestPolicyDialAddrACLMatchesResolvedIP(t *testing.T) {
 
 func TestPolicyDialAddrLiteralIPSkipsResolver(t *testing.T) {
 	res := &stubResolver{result: resolver.Result{Err: errors.New("should not be called")}}
-	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false), "9.9.9.9:443")
+	addr, err := tcpDialAddr(t, newOutboundPolicy(nil, res, false, nil), "9.9.9.9:443")
 	if err != nil {
 		t.Fatalf("unexpected err = %v", err)
 	}
@@ -192,10 +190,7 @@ func TestPolicyDialAddrLiteralIPSkipsResolver(t *testing.T) {
 func TestPolicyDialAddrNothingConfiguredKeepsFqdn(t *testing.T) {
 	// With neither dependency there is nothing to resolve for: the dialer
 	// resolves the name at connect time, as it did before the resolver existed.
-	p := newOutboundPolicy(nil, nil, false)
-	if p.active() {
-		t.Fatal("expected an empty policy to be inactive")
-	}
+	p := newOutboundPolicy(nil, nil, false, nil)
 	dst := M.ParseSocksaddr("example.com:443")
 	addr, err := tcpDialAddr(t, p, "example.com:443")
 	if err != nil || addr != dst {
@@ -240,7 +235,7 @@ func newTestPacketConn(t *testing.T, p *outboundPolicy) (*stubPacketConn, *polic
 }
 
 func TestPolicyPacketConnRejectDrops(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "reject(all, udp/443)\nreject(10.0.0.0/8)\ndirect(all)\n"), nil, false)
+	p := newOutboundPolicy(testEngine(t, "reject(all, udp/443)\nreject(10.0.0.0/8)\ndirect(all)\n"), nil, false, nil)
 	stub, c := newTestPacketConn(t, p)
 
 	writeTestPacket(t, c, "8.8.8.8:443") // rejected by proto/port
@@ -258,7 +253,7 @@ func TestPolicyPacketConnRejectDrops(t *testing.T) {
 }
 
 func TestPolicyPacketConnHijackRewrites(t *testing.T) {
-	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8, udp/53, 1.1.1.1)\ndirect(all)\n"), nil, false)
+	p := newOutboundPolicy(testEngine(t, "direct(8.8.8.8, udp/53, 1.1.1.1)\ndirect(all)\n"), nil, false, nil)
 	stub, c := newTestPacketConn(t, p)
 
 	writeTestPacket(t, c, "8.8.8.8:53")
@@ -269,7 +264,7 @@ func TestPolicyPacketConnHijackRewrites(t *testing.T) {
 
 func TestPolicyPacketConnResolvesAndCaches(t *testing.T) {
 	res := &stubResolver{result: resolver.Result{IPv4: net.IPv4(1, 2, 3, 4).To4()}}
-	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res, false))
+	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res, false, nil))
 
 	writeTestPacket(t, c, "example.com:53")
 	writeTestPacket(t, c, "example.com:53")
@@ -286,7 +281,7 @@ func TestPolicyPacketConnDropsOnResolveFailure(t *testing.T) {
 	// A resolve failure drops the packet but keeps the stream alive: it
 	// multiplexes other destinations that may resolve fine.
 	res := &stubResolver{result: resolver.Result{Err: errors.New("boom")}}
-	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res, false))
+	stub, c := newTestPacketConn(t, newOutboundPolicy(nil, res, false, nil))
 
 	writeTestPacket(t, c, "example.com:53")
 	if len(stub.written) != 0 {

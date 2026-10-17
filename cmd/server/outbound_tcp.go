@@ -2,7 +2,6 @@ package main
 
 import (
 	"anytls/acl"
-	"anytls/proxy"
 	"anytls/proxy/session"
 	"anytls/resolver"
 	"anytls/stats"
@@ -41,19 +40,15 @@ func clientError(err error) error {
 }
 
 func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, policy *outboundPolicy) error {
-	dialAddr := destination
-	if policy.active() {
-		var err error
-		dialAddr, err = policy.dialAddr(ctx, destination, acl.ProtocolTCP)
-		if err != nil {
-			logrus.Debugln("proxyOutboundTCP:", destination, err)
-			return E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
-		}
+	r, err := policy.selectRoute(ctx, destination, acl.ProtocolTCP)
+	if err != nil {
+		logrus.Debugln("proxyOutboundTCP:", destination, err)
+		return E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
 	}
 
-	c, err := proxy.SystemDialer.DialContext(ctx, "tcp", dialAddr.String())
+	c, err := r.outbound.DialTCP(ctx, r.target)
 	if err != nil {
-		logrus.Debugln("proxyOutboundTCP DialContext:", err)
+		logrus.Debugln("proxyOutboundTCP DialTCP:", err)
 		err = E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
 		return err
 	}
@@ -96,10 +91,7 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, legacy bool, counter s
 		return err
 	}
 
-	packetConn := N.PacketConn(bufio.NewPacketConn(c))
-	if policy.active() {
-		packetConn = newPolicyPacketConn(ctx, packetConn, policy)
-	}
+	packetConn := newPolicyPacketConn(ctx, bufio.NewPacketConn(c), policy)
 
 	uotConn := N.PacketConn(uot.NewConn(conn, *request))
 	if counter != nil {

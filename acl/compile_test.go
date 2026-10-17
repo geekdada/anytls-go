@@ -9,6 +9,17 @@ import (
 	"anytls/acl/v2geo"
 )
 
+// testAction stands in for an outbound type so these tests exercise the
+// generic rule set without importing cmd/server.
+type testAction string
+
+const (
+	ActionDirect testAction = "direct"
+	ActionReject testAction = "reject"
+)
+
+var testOutbounds = map[string]testAction{"direct": ActionDirect, "default": ActionDirect, "reject": ActionReject}
+
 var _ GeoLoader = (*testGeoLoader)(nil)
 
 type testGeoLoader struct{}
@@ -84,7 +95,7 @@ func TestCompile(t *testing.T) {
 			HijackAddress: "",
 		},
 	}
-	comp, err := Compile(rules, 100, &testGeoLoader{})
+	comp, err := Compile(rules, testOutbounds, 100, &testGeoLoader{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +104,7 @@ func TestCompile(t *testing.T) {
 		host       HostInfo
 		proto      Protocol
 		port       uint16
-		wantAction Action
+		wantAction testAction
 		wantMatch  bool
 		wantIP     net.IP
 	}{
@@ -154,11 +165,11 @@ func TestCompile(t *testing.T) {
 			wantIP:     net.ParseIP("2.2.2.2"),
 		},
 		{
-			host:       HostInfo{Name: "crap.v2ex.com"},
-			proto:      ProtocolTCP,
-			port:       81,
-			wantAction: ActionDirect,
-			wantMatch:  false,
+			host:  HostInfo{Name: "crap.v2ex.com"},
+			proto: ProtocolTCP,
+			port:  81,
+			// No match returns the outbound zero value; Engine.Lookup applies Default.
+			wantMatch: false,
 		},
 		{
 			host:       HostInfo{Name: "crap.v2ex.com"},
@@ -191,12 +202,12 @@ func TestCompile(t *testing.T) {
 			wantIP:     nil,
 		},
 		{
-			host:       HostInfo{Name: "fakemicrosoft.com"},
-			proto:      ProtocolTCP,
-			port:       5000,
-			wantAction: ActionDirect,
-			wantMatch:  false,
-			wantIP:     nil,
+			host:  HostInfo{Name: "fakemicrosoft.com"},
+			proto: ProtocolTCP,
+			port:  5000,
+			// No match returns the outbound zero value; Engine.Lookup applies Default.
+			wantMatch: false,
+			wantIP:    nil,
 		},
 		{
 			host:       HostInfo{IPv4: net.ParseIP("223.1.1.1")},
@@ -262,6 +273,19 @@ func TestCompile(t *testing.T) {
 	}
 }
 
+func TestCompileOutboundNameCaseInsensitive(t *testing.T) {
+	comp, err := Compile([]TextRule{
+		{Outbound: "WARP", Address: "all"},
+	}, map[string]testAction{"warp": "warp"}, 100, &testGeoLoader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, matched, hijack := comp.Match(HostInfo{Name: "example.com"}, ProtocolTCP, 443)
+	if got != "warp" || !matched || hijack != nil {
+		t.Fatalf("Match() = (%q, %v, %v), want (warp, true, nil)", got, matched, hijack)
+	}
+}
+
 func TestCompileGeoRules(t *testing.T) {
 	skipIfNoGeoFixtures(t)
 	rules := []TextRule{
@@ -269,7 +293,7 @@ func TestCompileGeoRules(t *testing.T) {
 		{Outbound: "reject", Address: "geosite:4chan", ProtoPort: "*/*"},
 		{Outbound: "reject", Address: "geosite:google @cn", ProtoPort: "*/*"},
 	}
-	comp, err := Compile(rules, 100, &testGeoLoader{})
+	comp, err := Compile(rules, testOutbounds, 100, &testGeoLoader{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +302,7 @@ func TestCompileGeoRules(t *testing.T) {
 		host       HostInfo
 		proto      Protocol
 		port       uint16
-		wantAction Action
+		wantAction testAction
 		wantMatch  bool
 	}{
 		{
@@ -289,11 +313,11 @@ func TestCompileGeoRules(t *testing.T) {
 			wantMatch:  true,
 		},
 		{
-			host:       HostInfo{IPv4: net.ParseIP("175.45.176.73")},
-			proto:      ProtocolTCP,
-			port:       80,
-			wantAction: ActionDirect,
-			wantMatch:  false,
+			host:  HostInfo{IPv4: net.ParseIP("175.45.176.73")},
+			proto: ProtocolTCP,
+			port:  80,
+			// No match returns the outbound zero value; Engine.Lookup applies Default.
+			wantMatch: false,
 		},
 		{
 			host:       HostInfo{Name: "boards.4channel.org"},
@@ -310,11 +334,11 @@ func TestCompileGeoRules(t *testing.T) {
 			wantMatch:  true,
 		},
 		{
-			host:       HostInfo{Name: "hoho.waymo.com"},
-			proto:      ProtocolUDP,
-			port:       9999,
-			wantAction: ActionDirect,
-			wantMatch:  false,
+			host:  HostInfo{Name: "hoho.waymo.com"},
+			proto: ProtocolUDP,
+			port:  9999,
+			// No match returns the outbound zero value; Engine.Lookup applies Default.
+			wantMatch: false,
 		},
 	}
 
@@ -333,7 +357,7 @@ func TestCompileErrors(t *testing.T) {
 	// Unknown outbound name
 	_, err := Compile([]TextRule{
 		{Outbound: "ob1", Address: "1.1.1.1"},
-	}, 100, &testGeoLoader{})
+	}, testOutbounds, 100, &testGeoLoader{})
 	if err == nil {
 		t.Error("expected error for unknown outbound, got nil")
 	}
@@ -341,7 +365,7 @@ func TestCompileErrors(t *testing.T) {
 	// Invalid port range
 	_, err = Compile([]TextRule{
 		{Outbound: "reject", Address: "1.1.2.0/24", ProtoPort: "*/3-1"},
-	}, 100, &testGeoLoader{})
+	}, testOutbounds, 100, &testGeoLoader{})
 	if err == nil {
 		t.Error("expected error for invalid port range, got nil")
 	}
@@ -349,7 +373,7 @@ func TestCompileErrors(t *testing.T) {
 	// Invalid hijack address
 	_, err = Compile([]TextRule{
 		{Outbound: "direct", Address: "1.1.1.1", HijackAddress: "not-an-ip"},
-	}, 100, &testGeoLoader{})
+	}, testOutbounds, 100, &testGeoLoader{})
 	if err == nil {
 		t.Error("expected error for invalid hijack address, got nil")
 	}
