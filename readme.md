@@ -217,7 +217,7 @@ bandwidth:
 
 ### 出站（outbounds）
 
-`outbounds` 定义具名出站，ACL 规则按名称引用。支持 `direct`（直连）与 `socks5` 两种类型，类型不区分大小写。`default` 始终表示列表中的第一项；未配置 ACL 时所有流量都走 `default`，未配置 `outbounds` 时 `default` 等同 `direct`。用户条目可以覆盖内置名称 `direct`、`reject`、`default`。
+`outbounds` 定义具名出站，ACL 规则按名称引用。支持 `direct`（直连）与 `socks5` 两种类型，类型不区分大小写。`default` 是列表中的第一项，除非用户条目也命名为 `default`；未配置 ACL 时所有流量都走 `default`，未配置 `outbounds` 时 `default` 等同 `direct`。用户条目可以覆盖内置名称 `direct`、`reject`、`default`。
 
 - `socks5` 需要 `addr`，`username` 与 `password` 同时设置或同时省略。SOCKS5 出站接收域名并自行解析；本地解析结果只用于 ACL 匹配与私网检查，不用于拨号。
 - `outbound.allowPrivate: false` 时，域名仍会先在本地解析并检查是否属于内网，本地解析不出的域名会被拒绝。
@@ -230,7 +230,7 @@ bandwidth:
 
 默认禁止客户端连接以下地址：回环（`127.0.0.0/8`、`::1`）、私有网段（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`fc00::/7`）、链路本地（`169.254.0.0/16`、`fe80::/10`，含云服务器元数据地址 `169.254.169.254`）、共享地址（`100.64.0.0/10`）、`0.0.0.0/8`、广播与组播地址。这样代理用户无法访问服务器本机的服务（例如流量统计 API）、服务器所在内网或云元数据接口。
 
-- 域名目标会先解析，按解析出的 IP 检查并直接拨该 IP，域名指向内网地址同样会被拒绝。未配置 `resolver` 时使用系统解析器。
+- 域名目标会先解析，按解析出的 IP 检查是否属于内网，域名指向内网地址同样会被拒绝。`direct` 出站拨解析出的 IP；`socks5` 出站只把解析结果用于检查，随后把域名交给代理自行解析。未配置 `resolver` 时使用系统解析器。
 - 检查在 ACL 之后进行：ACL 的 `reject` 优先；ACL 劫持规则的目标地址由运维指定，不受此限制。
 - TCP 请求被拒时客户端收到 `blocked by server policy`；UDP（udp over tcp）报文静默丢弃、流保持存活。
 - 需要通过代理访问内网时设置 `outbound.allowPrivate: true`，启动日志会给出警告。

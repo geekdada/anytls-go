@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing/common/auth"
+	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -22,9 +23,10 @@ type SOCKS5Server struct {
 	authenticator *auth.Authenticator
 	listener      net.Listener
 
-	mu           sync.Mutex
-	conns        []net.Conn
-	destinations []string
+	mu                 sync.Mutex
+	conns              []net.Conn
+	destinations       []string
+	packetDestinations []string
 }
 
 func NewSOCKS5Server(t testing.TB, username, password string) *SOCKS5Server {
@@ -75,6 +77,13 @@ func (s *SOCKS5Server) ConnectDestinations() []string {
 	return append([]string(nil), s.destinations...)
 }
 
+// PacketDestinations returns the UDP destinations seen so far, in order.
+func (s *SOCKS5Server) PacketDestinations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.packetDestinations...)
+}
+
 // DropControls closes every accepted TCP connection, ending the SOCKS
 // sessions and the UDP associations that depend on them.
 func (s *SOCKS5Server) DropControls() {
@@ -108,5 +117,28 @@ func (s *SOCKS5Server) NewPacketConnection(ctx context.Context, conn N.PacketCon
 	}
 	packetConn := bufio.NewPacketConn(remote)
 	defer packetConn.Close()
-	return bufio.CopyPacketConn(ctx, conn, packetConn)
+	return bufio.CopyPacketConn(ctx, &recordingPacketConn{PacketConn: conn, server: s}, packetConn)
+}
+
+// recordingPacketConn records the destinations the SOCKS5 client asks the
+// proxy to forward, so tests can tell a proxied path from a direct one.
+type recordingPacketConn struct {
+	N.PacketConn
+	server *SOCKS5Server
+}
+
+func (c *recordingPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	destination, err := c.PacketConn.ReadPacket(buffer)
+	if err == nil {
+		c.server.mu.Lock()
+		c.server.packetDestinations = append(c.server.packetDestinations, destination.String())
+		c.server.mu.Unlock()
+	}
+	return destination, err
+}
+
+// Upstream lets headroom and MTU calculations see the wrapped conn; without it
+// the relay reserves no room for the SOCKS5 UDP header.
+func (c *recordingPacketConn) Upstream() any {
+	return c.PacketConn
 }

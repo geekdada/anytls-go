@@ -111,11 +111,15 @@ func TestTCPThroughSOCKS5(t *testing.T) {
 
 func TestUoTThroughSOCKS5(t *testing.T) {
 	srv := outboundtest.NewSOCKS5Server(t, "u", "p")
-	conn := openStream(t, stats.NewRegistry(), uot.RequestDestination(uot.Version), uotBody(t, uot.Version, udpEcho(t)),
+	echo := udpEcho(t)
+	conn := openStream(t, stats.NewRegistry(), uot.RequestDestination(uot.Version), uotBody(t, uot.Version, echo),
 		newOutboundPolicy(nil, nil, false, outbound.NewSOCKS5(srv.Addr, "u", "p")))
 
 	if got := readPSH(t, conn, 1); len(got) == 0 {
 		t.Fatal("no echoed UoT packet")
+	}
+	if got := srv.PacketDestinations(); !slices.Contains(got, echo.String()) {
+		t.Fatalf("packet destinations = %v, want to contain %s", got, echo)
 	}
 }
 
