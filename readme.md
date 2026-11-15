@@ -6,6 +6,8 @@
 - 连接复用，降低代理延迟
 - 简洁的配置
 
+## 协议与设计
+
 [用户常见问题](./docs/faq.md)
 
 [协议文档](./docs/protocol.md)
@@ -41,7 +43,9 @@ curl -fsSL https://308.li/anytls-go | bash -s -- uninstall
 
 脚本源码见 [`scripts/install.sh`](scripts/install.sh)。默认安装目录为 `/usr/local/bin`，配置文件写入 `/etc/anytls/server.yaml`。
 
-## 快速食用方法
+## 示例项目
+
+> 📌 **项目定位**：本项目是 AnyTLS 协议的**参考实现**，核心目标是**演示协议细节、交互流程与边界场景**，而非提供功能完备的生产级客户端。日常使用推荐 [第三方兼容软件](#第三方兼容软件)。
 
 示例服务器未配置证书时会生成临时自签证书。示例客户端默认校验服务器证书，连接这类服务器时需加 `-insecure`（或在 URI 中写 `insecure=1`）。跳过校验后，中间人可以截获通信内容和握手凭据 `sha256(password)`，并用该凭据冒充您连接服务器。生产环境请为服务器配置受信任的证书（见 `tls` 配置）。
 
@@ -68,6 +72,8 @@ v0.0.12 版本起，示例客户端可直接使用 URI 格式:
 ./anytls-client -l 127.0.0.1:1080 -s "anytls://password@host:port/?insecure=1"
 ```
 
+## 第三方兼容软件
+
 ### sing-box
 
 https://github.com/SagerNet/sing-box
@@ -80,9 +86,13 @@ https://github.com/MetaCubeX/mihomo
 
 它包含了 anytls 协议的服务器和客户端。
 
-### Shadowrocket
+### iOS 独立客户端实现
 
-Shadowrocket 2.2.65+ 实现了 anytls 协议的客户端。
+`Shadowrocket` 2.2.65+ 实现了 anytls 协议的客户端。
+
+`Stash` `Loon` 等客户端已跟进适配。
+
+这些客户端的具体实现细节与协议规范的契合度由各自维护团队负责，其细节处理路径与边界场景应对可能因版本而异，本项目未作验证。
 
 ## 本分支相对上游的改动
 
