@@ -190,9 +190,11 @@ func pickDialAddr(destination M.Socksaddr, result resolver.Result, attempted boo
 	}
 }
 
+// policyDecision keeps the policy error so a cached rejection can still be
+// logged on later packets.
 type policyDecision struct {
-	rejected bool
-	route    route
+	err   error
+	route route
 }
 
 // routedPacketConn applies the policy per packet for udp-over-tcp and sends the
@@ -203,10 +205,8 @@ type policyDecision struct {
 // which differs from hysteria on purpose, because there a stream can otherwise
 // leave through an egress its ACL decision did not choose.
 //
-// Rejected packets are dropped silently (mirroring hysteria, which ignores
-// per-packet Feed errors), and so are packets whose destination cannot be
-// resolved: returning an error here would tear down the whole stream inside
-// bufio.CopyPacketConn, taking every other destination it multiplexes with it.
+// Rejected and unresolvable packets are dropped without returning an error to
+// keep the multiplexed stream alive. See logDrop for when a drop is logged.
 // A ListenUDP failure is the exception; it ends the stream, as it does in
 // hysteria. Decisions are cached per destination for the life of the stream.
 type routedPacketConn struct {
@@ -235,13 +235,23 @@ func newRoutedPacketConn(ctx context.Context, p *outboundPolicy) *routedPacketCo
 
 func (c *routedPacketConn) decide(destination M.Socksaddr) policyDecision {
 	r, err := c.policy.selectRoute(c.ctx, destination, acl.ProtocolUDP)
-	if err != nil {
-		if !errors.Is(err, errACLRejected) && !errors.Is(err, errPrivateDestination) {
-			logrus.Debugln("routedPacketConn drop:", destination, err)
-		}
-		return policyDecision{rejected: true}
+	return policyDecision{err: err, route: r}
+}
+
+// logDrop mirrors hysteria's UDP log timing. Hysteria rebuilds a UDP session
+// after its first message fails. It therefore warns on every failure until a
+// socket opens and stays silent after that. Hysteria opens a socket even for an
+// unresolvable name, so resolution failures never warn. The private-destination
+// filter has no hysteria counterpart. It is logged like an ACL rejection.
+func (c *routedPacketConn) logDrop(destination M.Socksaddr, err error) {
+	var resolveErr resolver.Error
+	if errors.As(err, &resolveErr) {
+		logrus.Debugln("routedPacketConn drop:", destination, err)
+		return
 	}
-	return policyDecision{route: r}
+	if c.currentConn() == nil {
+		logrus.Warnln("routedPacketConn rejected:", destination, err)
+	}
 }
 
 func (c *routedPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) error {
@@ -257,7 +267,8 @@ func (c *routedPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) e
 		}
 		c.cache[key] = d
 	}
-	if d.rejected {
+	if d.err != nil {
+		c.logDrop(destination, d.err)
 		// CopyPacketConn hands us ownership of the buffer on every call.
 		b.Release()
 		return nil
@@ -272,7 +283,7 @@ func (c *routedPacketConn) WritePacket(b *buf.Buffer, destination M.Socksaddr) e
 	if c.conn == nil {
 		conn, err := d.route.outbound.ListenUDP(c.ctx)
 		if err != nil {
-			logrus.Debugln("routedPacketConn ListenUDP:", err)
+			logrus.Warnln("routedPacketConn ListenUDP:", err)
 			c.mu.Unlock()
 			b.Release()
 			return err

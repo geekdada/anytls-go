@@ -42,15 +42,14 @@ func clientError(err error) error {
 func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr, st *stats.StreamStats, policy *outboundPolicy) error {
 	r, err := policy.selectRoute(ctx, destination, acl.ProtocolTCP)
 	if err != nil {
-		logrus.Debugln("proxyOutboundTCP:", destination, err)
+		logrus.Warnln("proxyOutboundTCP:", destination, err)
 		return E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
 	}
 
 	c, err := r.outbound.DialTCP(ctx, r.target)
 	if err != nil {
-		logrus.Debugln("proxyOutboundTCP DialTCP:", err)
-		err = E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
-		return err
+		logrus.Warnln("proxyOutboundTCP DialTCP:", destination, err)
+		return E.Errors(err, N.ReportHandshakeFailure(conn, clientError(err)))
 	}
 
 	err = N.ReportHandshakeSuccess(conn)
